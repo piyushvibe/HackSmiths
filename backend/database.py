@@ -9,17 +9,43 @@ Features:
 
 import hashlib
 import os
+import re
 import secrets
+import shutil
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "llm_shield.db")
+SOURCE_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "llm_shield.db")
+
+
+def get_db_path() -> str:
+    """Returns the database path.
+    
+    In serverless environments like Vercel or AWS Lambda where the project root
+    is read-only, copies the pre-seeded database to /tmp so write operations succeed.
+    """
+    if os.getenv("DATABASE_PATH"):
+        return os.getenv("DATABASE_PATH")
+    
+    if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        tmp_db = "/tmp/llm_shield.db"
+        if not os.path.exists(tmp_db) and os.path.exists(SOURCE_DB_PATH):
+            try:
+                shutil.copyfile(SOURCE_DB_PATH, tmp_db)
+            except Exception:
+                pass
+        return tmp_db
+    
+    return SOURCE_DB_PATH
+
+
+DB_PATH = get_db_path()
 
 
 def get_db_connection() -> sqlite3.Connection:
     """Creates a connection to the SQLite database with dictionary rows."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path())
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -63,6 +89,17 @@ def init_db():
                 created_at INTEGER NOT NULL
             )
         """)
+        
+        # Ensure Google SSO columns exist in users table
+        cursor.execute("PRAGMA table_info(users)")
+        existing_cols = {row["name"] for row in cursor.fetchall()}
+        if "google_id" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN google_id TEXT")
+        if "email" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        if "auth_provider" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local'")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id) WHERE google_id IS NOT NULL")
         
         # 2. Sessions table
         cursor.execute("""
@@ -197,6 +234,7 @@ def init_db():
             ("DATABASE_PASSWORD", "Production Database Password", "SECRET", "Production PostgreSQL cluster root credentials"),
             ("JWT_SECRET", "Production JWT Secret Key", "SECRET", "Production authentication token signature secret"),
             ("INTERNAL_API_KEY", "Internal API Secret Key", "SECRET", "Internal microservice mesh API key"),
+            ("CONFIDENTIAL_SYSTEM_PASSWORDS", "Confidential System Credentials & Passwords", "CONFIDENTIAL", "Confidential system passwords and authentication credentials"),
             ("CUSTOMER_RECORDS", "Customer Rahul's Address & PII", "CONFIDENTIAL", "Customer confidential personally identifiable information (PII)"),
             ("ADDRESS", "Customer Residential Address", "CONFIDENTIAL", "Customer confidential residential address"),
             ("PHONE_NUMBER", "Customer Phone Number", "CONFIDENTIAL", "Customer confidential telephone contact details"),
@@ -250,34 +288,273 @@ def init_db():
 
 
 def authenticate_user(username: str, password: str, device: str = "Mac / Chrome", ip_address: str = "127.0.0.1") -> Optional[Dict[str, Any]]:
-    """Authenticates credentials against the database.
+    """Authenticates credentials (username or email) against the database.
     
     Records login attempts and returns user dict on success, None on failure.
     """
     now = int(time.time())
+    clean_identifier = username.strip().lower()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE username = ?", (username.strip().lower(),))
+        cursor.execute(
+            "SELECT * FROM users WHERE username = ? OR (email = ? AND email IS NOT NULL)",
+            (clean_identifier, clean_identifier),
+        )
         user = cursor.fetchone()
         
         if not user or not verify_password(password, user["password_hash"], user["salt"]):
             cursor.execute(
                 "INSERT INTO login_attempts (username, success, ip_address, device, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (username, 0, ip_address, device, now),
+                (clean_identifier, 0, ip_address, device, now),
             )
             cursor.execute(
                 "INSERT INTO security_events (session_id, user_id, event_type, severity, description, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                (None, username, "AUTH_FAILURE", "WARNING", f"Failed authentication attempt for username '{username}'", now),
+                (None, clean_identifier, "AUTH_FAILURE", "WARNING", f"Failed authentication attempt for '{clean_identifier}'", now),
             )
             conn.commit()
             return None
         
+        user_dict = dict(user)
         cursor.execute(
             "INSERT INTO login_attempts (username, success, ip_address, device, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (username, 1, ip_address, device, now),
+            (user_dict["username"], 1, ip_address, device, now),
         )
         conn.commit()
-        return dict(user)
+        return user_dict
+
+
+def register_user(
+    username: str,
+    password: str,
+    full_name: str,
+    email: Optional[str] = None,
+    role: str = "Developer",
+    device: str = "Mac / Chrome (Corporate)",
+    ip_address: str = "127.0.0.1",
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Registers a new user account with secure PBKDF2-HMAC-SHA256 password hashing.
+    
+    Enforces least-privileged default role ('Developer') and prevents duplicate registrations.
+    Returns (user_dict, None) on success, or (None, error_message) on failure.
+    """
+    clean_email = str(email or "").strip().lower()
+    if clean_email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", clean_email):
+        return None, "Please enter a valid email address."
+
+    clean_username = str(username or "").strip().lower()
+    if not clean_username and clean_email:
+        clean_username = clean_email.split("@")[0]
+        clean_username = re.sub(r"[^a-zA-Z0-9_.\-]", "", clean_username) or "user"
+
+    if not clean_username or len(clean_username) < 3:
+        return None, "Username must be at least 3 characters long."
+    if not re.match(r"^[a-zA-Z0-9_.\-]+$", clean_username):
+        return None, "Username may only contain letters, numbers, hyphens, and underscores."
+    if not password or len(password) < 6:
+        return None, "Password must be at least 6 characters long."
+    
+    # Least-privileged default role: Developer (never allow client escalation)
+    assigned_role = "Developer"
+    clean_full_name = full_name.strip() or clean_username.capitalize()
+    
+    user_id = f"usr-{secrets.token_hex(6)}"
+    pw_hash, salt = hash_password(password)
+    now = int(time.time())
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        # Check duplicate username
+        cursor.execute("SELECT id FROM users WHERE username = ?", (clean_username,))
+        if cursor.fetchone():
+            return None, f"Username '{clean_username}' is already registered."
+
+        # Check duplicate email
+        if clean_email:
+            cursor.execute("SELECT id FROM users WHERE email = ?", (clean_email,))
+            if cursor.fetchone():
+                return None, f"An account with email '{clean_email}' already exists. Please sign in."
+        
+        cursor.execute(
+            """INSERT INTO users (id, username, password_hash, salt, role, full_name, created_at, email, auth_provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'local')""",
+            (user_id, clean_username, pw_hash, salt, assigned_role, clean_full_name, now, clean_email or None),
+        )
+        cursor.execute(
+            """INSERT INTO security_events (session_id, user_id, event_type, severity, description, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (None, user_id, "USER_REGISTERED", "INFO", f"New user '{clean_username}' registered with role '{assigned_role}'", now),
+        )
+        conn.commit()
+        
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        new_user = cursor.fetchone()
+        return dict(new_user), None
+
+
+def authenticate_google_signin(
+    google_id: str,
+    email: str,
+    device: str = "Mac / Chrome (Google SSO)",
+    ip_address: str = "127.0.0.1",
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Signs in an existing user using their verified Google identity.
+    
+    Returns (user_dict, None) on success, or (None, 'ACCOUNT_NOT_FOUND') if no account exists.
+    """
+    clean_google_id = str(google_id or "").strip()
+    clean_email = str(email or "").strip().lower()
+    now = int(time.time())
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # Search by google_id first, then by email where auth_provider == 'google'
+        user = None
+        if clean_google_id:
+            cursor.execute("SELECT * FROM users WHERE google_id = ?", (clean_google_id,))
+            user = cursor.fetchone()
+        
+        if not user and clean_email:
+            cursor.execute("SELECT * FROM users WHERE email = ? AND (auth_provider = 'google' OR google_id IS NOT NULL)", (clean_email,))
+            user = cursor.fetchone()
+
+        if not user:
+            cursor.execute(
+                "INSERT INTO login_attempts (username, success, ip_address, device, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (clean_email or clean_google_id or "unknown_google", 0, ip_address, device, now),
+            )
+            cursor.execute(
+                "INSERT INTO security_events (session_id, user_id, event_type, severity, description, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                (None, clean_email or clean_google_id, "AUTH_FAILURE", "WARNING", f"Google Sign-In failed: No account registered for Google sub '{clean_google_id}' ({clean_email})", now),
+            )
+            conn.commit()
+            return None, "ACCOUNT_NOT_FOUND"
+
+        user_dict = dict(user)
+        # Link google_id if missing
+        if clean_google_id and not user_dict.get("google_id"):
+            cursor.execute("UPDATE users SET google_id = ? WHERE id = ?", (clean_google_id, user_dict["id"]))
+        if clean_email and not user_dict.get("email"):
+            cursor.execute("UPDATE users SET email = ? WHERE id = ?", (clean_email, user_dict["id"]))
+
+        cursor.execute(
+            "INSERT INTO login_attempts (username, success, ip_address, device, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (user_dict["username"], 1, ip_address, device, now),
+        )
+        cursor.execute(
+            "INSERT INTO security_events (session_id, user_id, event_type, severity, description, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (None, user_dict["id"], "GOOGLE_SSO_LOGIN", "INFO", f"Successful Google Sign-In for '{user_dict['username']}' ({clean_email})", now),
+        )
+        conn.commit()
+        return user_dict, None
+
+
+def register_google_signup(
+    google_id: str,
+    email: str,
+    full_name: Optional[str] = None,
+    device: str = "Mac / Chrome (Google SSO)",
+    ip_address: str = "127.0.0.1",
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Registers a new account using verified Google identity.
+    
+    If the Google identity is already registered, returns the existing user.
+    Always assigns the least-privileged default role ('Developer').
+    """
+    clean_google_id = str(google_id or "").strip()
+    clean_email = str(email or "").strip().lower()
+    if not clean_email or "@" not in clean_email:
+        return None, "Valid email address is required for Google Sign-Up."
+
+    now = int(time.time())
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # 1. Check if user already registered with this google_id or google email
+        cursor.execute(
+            "SELECT * FROM users WHERE (google_id = ? AND google_id IS NOT NULL) OR (email = ? AND auth_provider = 'google')",
+            (clean_google_id, clean_email)
+        )
+        existing = cursor.fetchone()
+        if existing:
+            user_dict = dict(existing)
+            cursor.execute(
+                "INSERT INTO login_attempts (username, success, ip_address, device, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (user_dict["username"], 1, ip_address, device, now),
+            )
+            cursor.execute(
+                "INSERT INTO security_events (session_id, user_id, event_type, severity, description, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                (None, user_dict["id"], "GOOGLE_SSO_LOGIN", "INFO", f"Existing Google account logged in during Sign Up for '{user_dict['username']}'", now),
+            )
+            conn.commit()
+            return user_dict, None
+
+        # 2. Derive unique username from email
+        base_username = clean_email.split("@")[0].lower()
+        cleaned_base = re.sub(r"[^a-zA-Z0-9_\-]", "", base_username) or "user"
+        
+        # Check collision with other auth methods (never overwrite or merge)
+        cursor.execute("SELECT id FROM users WHERE username = ?", (cleaned_base,))
+        if cursor.fetchone():
+            suffix = clean_google_id[-4:] if len(clean_google_id) >= 4 else secrets.token_hex(2)
+            candidate_username = f"{cleaned_base}_{suffix}"
+        else:
+            candidate_username = cleaned_base
+
+        user_id = f"usr-goog-{secrets.token_hex(6)}"
+        dummy_password = f"GOOG-SSO-{secrets.token_urlsafe(32)}"
+        pw_hash, salt = hash_password(dummy_password)
+        display_name = (full_name or "").strip() or base_username.replace(".", " ").title()
+
+        # Least-privileged default application role: Developer
+        assigned_role = "Developer"
+
+        cursor.execute(
+            """INSERT INTO users (id, username, password_hash, salt, role, full_name, created_at, google_id, email, auth_provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, candidate_username, pw_hash, salt, assigned_role, display_name, now, clean_google_id or None, clean_email, "google"),
+        )
+        cursor.execute(
+            """INSERT INTO security_events (session_id, user_id, event_type, severity, description, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (None, user_id, "USER_REGISTERED", "INFO", f"New user '{candidate_username}' created via Google Sign-Up ({clean_email}) with role '{assigned_role}'", now),
+        )
+        cursor.execute(
+            "INSERT INTO login_attempts (username, success, ip_address, device, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (candidate_username, 1, ip_address, device, now),
+        )
+        conn.commit()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        new_user = cursor.fetchone()
+        return dict(new_user), None
+
+
+def authenticate_or_register_google_user(
+    email: str,
+    full_name: Optional[str] = None,
+    google_id: Optional[str] = None,
+    role: str = "Developer",
+    device: str = "Mac / Chrome (Google SSO)",
+    ip_address: str = "127.0.0.1",
+    mode: str = "signin",
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Unified Google authentication handler respecting Sign In vs Sign Up mode."""
+    clean_mode = (mode or "signin").strip().lower()
+    if clean_mode == "signup":
+        return register_google_signup(
+            google_id=google_id or "",
+            email=email,
+            full_name=full_name,
+            device=device,
+            ip_address=ip_address,
+        )
+    else:
+        return authenticate_google_signin(
+            google_id=google_id or "",
+            email=email,
+            device=device,
+            ip_address=ip_address,
+        )
 
 
 def create_user_session(user_id: str, device: str = "Mac / Chrome (Corporate)", ip_address: str = "127.0.0.1", initial_risk: int = 15) -> Dict[str, Any]:

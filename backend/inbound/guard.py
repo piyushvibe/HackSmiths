@@ -28,7 +28,6 @@ SYSTEM_PROMPT_EXTRACTION_PATTERNS: List[re.Pattern] = [
     re.compile(r"\b(?:show|tell)\s+me\s+what\s+you\s+were\s+told\s+before\b", re.IGNORECASE),
     re.compile(r"\boutput\s+your\s+pre-?prompt\b", re.IGNORECASE),
     re.compile(r"\bshow\s+me\s+(?:the\s+)?(?:full\s+)?system\s+configuration\b", re.IGNORECASE),
-    re.compile(r"\b(?:reveal|disclose|show|leak|output)\s+(?:secret|secrets|passwords?|credentials?)\b", re.IGNORECASE),
 ]
 
 # 3. Delimiter and Boundary Escaping
@@ -52,6 +51,41 @@ HYPNOSIS_ROLEPLAY_PATTERNS: List[re.Pattern] = [
     re.compile(r"\banswer\s+as\s+(?:an\s+)?(?:unfiltered|uncensored|jailbroken)\b", re.IGNORECASE),
     re.compile(r"\bfor\s+(?:educational|research|academic)\s+purposes\s+only\s*,?\s*ignore\s+safety\b", re.IGNORECASE),
     re.compile(r"\b(?:cyber[\s\u2011\-]red\s+team|pretend\s+to\s+be\s+a\s+rogue\s+ai)\b", re.IGNORECASE),
+]
+
+# 5. Confidential Credential and System Password Extraction
+CREDENTIAL_EXTRACTION_PATTERNS: List[re.Pattern] = [
+    # 1. Extraction verbs requesting passwords/credentials
+    re.compile(
+        r"\b(?:give|tell|reveal|show|print|display|dump|leak|output|extract|provide|share|fetch)\s+(?:me\s+)?"
+        r"(?:the\s+|all\s+|any\s+|stored\s+|our\s+|my\s+)?"
+        r"(?:[a-z0-9_\-]+\s+){0,4}"
+        r"(?:passwords?|passcodes?|root\s+credentials?|admin\s+credentials?|system\s+credentials?|network\s+(?:access\s+)?credentials?)\b",
+        re.IGNORECASE,
+    ),
+    # 2. Inquiry asking for passwords or credentials ("what is ... password?")
+    re.compile(
+        r"\bwhat\s+(?:is|are|'s)\s+(?:the\s+)?"
+        r"(?:[a-z0-9_\-]+\s+){0,4}"
+        r"(?:passwords?|passcodes?|root\s+credentials?|admin\s+credentials?|system\s+credentials?)\b",
+        re.IGNORECASE,
+    ),
+    # 3. Contextual password/credential reference ("password for ...", "password in ...")
+    re.compile(
+        r"\b(?:passwords?|passcodes?|login\s+credentials?|admin\s+credentials?|system\s+credentials?)\s+"
+        r"(?:in|of|for|used\s+to\s+access|stored\s+in|from)\s+(?:the\s+)?(?:system|server|database|db|network|admin|platform|application|app|backend|vault|environment|machine|auth\w*|service)\b",
+        re.IGNORECASE,
+    ),
+    # 4. Direct request ("can you tell me the password")
+    re.compile(
+        r"\b(?:can\s+you\s+)?(?:tell|give|show|provide|share)\s+(?:me\s+)?(?:the\s+)?(?:[a-z0-9_\-]+\s+){0,3}(?:password|passwords|passcode|system\s+credentials?|admin\s+credentials?|root\s+credentials?)\b",
+        re.IGNORECASE,
+    ),
+    # 5. Bulk credential dump
+    re.compile(
+        r"\bdump\s+(?:all\s+)?(?:stored\s+)?(?:passwords?|system\s+credentials?|admin\s+credentials?)\b",
+        re.IGNORECASE,
+    ),
 ]
 
 
@@ -97,6 +131,23 @@ def evaluate_guard(
         return GuardVerdict(
             is_malicious=True,
             threat_type=threat,
+            confidence=0.98,
+            latency_ms=round(latency_ms, 3),
+            tier_triggered=tier,
+        )
+
+    # Check Confidential Credential and System Password Extraction
+    is_educational = any(k in prompt.lower() for k in [
+        "policy", "manager", "guideline", "guidelines", "best practice", "best practices", "practices",
+        "how to create", "how to choose", "definition", "algorithm", "complexity", "hashing", "bcrypt"
+    ])
+    is_cloud_asset_request = any(k in prompt.lower() for k in ["aws secret", "aws key", "cloud secret"])
+    if not is_educational and not is_cloud_asset_request and match_patterns(prompt, CREDENTIAL_EXTRACTION_PATTERNS):
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
+        tier = "Tier 0 (De-cloaker)" if has_obfuscation else "Tier 3 (0.5B Guard)"
+        return GuardVerdict(
+            is_malicious=True,
+            threat_type="CONFIDENTIAL_CREDENTIAL_EXTRACTION",
             confidence=0.98,
             latency_ms=round(latency_ms, 3),
             tier_triggered=tier,

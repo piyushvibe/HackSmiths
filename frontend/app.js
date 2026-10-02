@@ -40,22 +40,53 @@
     isCompromisedSimulation: false,
   };
 
-  // --- DOM Elements: Auth & Login ---
+  // --- DOM Elements: Authentication (Google + Email/Password) ---
   const loginView = document.getElementById("loginView");
   const appView = document.getElementById("appView");
-  const loginForm = document.getElementById("loginForm");
-  const usernameInput = document.getElementById("usernameInput");
-  const passwordInput = document.getElementById("passwordInput");
-  const togglePasswordBtn = document.getElementById("togglePasswordBtn");
+  const tabSignIn = document.getElementById("tabSignIn");
+  const tabSignUp = document.getElementById("tabSignUp");
+  const signInView = document.getElementById("signInView");
+  const signUpView = document.getElementById("signUpView");
+  const authModeTitle = document.getElementById("authModeTitle");
+  const authModeSub = document.getElementById("authModeSub");
+  const btnGoogleAuth = document.getElementById("btnGoogleAuth");
+  const btnGoogleAuthSignUp = document.getElementById("btnGoogleAuthSignUp");
+  const googleBtnLabel = document.getElementById("googleBtnLabel");
+  const googleSpinner = document.getElementById("googleSpinner");
+  const googleSpinnerSignUp = document.getElementById("googleSpinnerSignUp");
+  const authSwitchText = document.getElementById("authSwitchText");
+  const authSwitchLink = document.getElementById("authSwitchLink");
+  const linkToSignIn = document.getElementById("linkToSignIn");
   const loginAlert = document.getElementById("loginAlert");
   const loginAlertMsg = document.getElementById("loginAlertMsg");
-  const fillDemoDevBtn = document.getElementById("fillDemoDevBtn");
-  const fillDemoAdminBtn = document.getElementById("fillDemoAdminBtn");
-  const forgotPasswordBtn = document.getElementById("forgotPasswordBtn");
-  const forgotModal = document.getElementById("forgotModal");
-  const closeForgotModalBtn = document.getElementById("closeForgotModalBtn");
-  const closeForgotNoticeBtn = document.getElementById("closeForgotNoticeBtn");
+  const loginAlertIcon = document.getElementById("loginAlertIcon");
   const logoutBtn = document.getElementById("logoutBtn");
+
+  // Sign In Form Elements
+  const signInForm = document.getElementById("signInForm");
+  const loginEmail = document.getElementById("loginEmail");
+  const loginPassword = document.getElementById("loginPassword");
+  const toggleLoginPassword = document.getElementById("toggleLoginPassword");
+  const btnSubmitSignIn = document.getElementById("btnSubmitSignIn");
+  const signInBtnText = document.getElementById("signInBtnText");
+  const signInSpinner = document.getElementById("signInSpinner");
+
+  // Sign Up Form Elements
+  const signUpForm = document.getElementById("signUpForm");
+  const regFullName = document.getElementById("regFullName");
+  const regEmail = document.getElementById("regEmail");
+  const regPassword = document.getElementById("regPassword");
+  const toggleRegPassword = document.getElementById("toggleRegPassword");
+  const regPasswordConfirm = document.getElementById("regPasswordConfirm");
+  const toggleRegPasswordConfirm = document.getElementById("toggleRegPasswordConfirm");
+  const btnSubmitSignUp = document.getElementById("btnSubmitSignUp");
+  const signUpBtnText = document.getElementById("signUpBtnText");
+  const signUpSpinner = document.getElementById("signUpSpinner");
+
+  // Google OAuth state tracking
+  let authMode = "signin"; // "signin" or "signup"
+  let isAuthLoading = false;
+  let googleConfig = { client_id: "", configured: false, auth_url: "/auth/google/login" };
 
   // --- DOM Elements: Identity & Risk Banner ---
   const navUserName = document.getElementById("navUserName");
@@ -243,54 +274,386 @@
   }
 
   // ==========================================================================
-  // 2. Authentication & Session Management
+  // 2. Authentication & Session Management (Google-Only SSO)
   // ==========================================================================
-
-  function showLoginError(msg) {
-    if (loginAlert) {
-      loginAlertMsg.textContent = msg;
-      loginAlert.classList.remove("hidden");
-    }
-  }
 
   function hideLoginError() {
     if (loginAlert) loginAlert.classList.add("hidden");
   }
 
-  async function handleLogin(username, password) {
+  function showLoginError(msg, icon = "⚠️") {
+    if (loginAlert) {
+      if (loginAlertMsg) loginAlertMsg.textContent = msg;
+      if (loginAlertIcon) loginAlertIcon.textContent = icon;
+      loginAlert.classList.remove("hidden");
+    }
+  }
+
+  function setAuthMode(mode) {
+    authMode = mode === "signup" ? "signup" : "signin";
     hideLoginError();
+
+    if (authMode === "signin") {
+      tabSignIn?.classList.add("active");
+      tabSignIn?.setAttribute("aria-selected", "true");
+      tabSignUp?.classList.remove("active");
+      tabSignUp?.setAttribute("aria-selected", "false");
+
+      signInView?.classList.remove("hidden");
+      signUpView?.classList.add("hidden");
+    } else {
+      tabSignUp?.classList.add("active");
+      tabSignUp?.setAttribute("aria-selected", "true");
+      tabSignIn?.classList.remove("active");
+      tabSignIn?.setAttribute("aria-selected", "false");
+
+      signUpView?.classList.remove("hidden");
+      signInView?.classList.add("hidden");
+    }
+  }
+
+  function setGoogleAuthLoading(loading, label = "Continue with Google") {
+    isAuthLoading = loading;
+    const spinners = [googleSpinner, googleSpinnerSignUp];
+    const btns = [btnGoogleAuth, btnGoogleAuthSignUp];
+
+    btns.forEach((btn) => {
+      if (btn) btn.disabled = loading;
+    });
+    spinners.forEach((sp) => {
+      if (sp) {
+        if (loading) sp.classList.remove("hidden");
+        else sp.classList.add("hidden");
+      }
+    });
+    if (googleBtnLabel) {
+      googleBtnLabel.textContent = label;
+    }
+  }
+
+  async function triggerGoogleAuth(targetMode) {
+    if (isAuthLoading) return;
+    hideLoginError();
+
+    const mode = targetMode || authMode;
+
+    // Check if Google is configured on backend
+    if (!googleConfig.configured) {
+      try {
+        const checkResp = await fetch("/auth/google/config");
+        if (checkResp.ok) {
+          googleConfig = await checkResp.json();
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (!googleConfig.configured) {
+      showLoginError(
+        "Google OAuth configuration is missing on the server. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the server .env file.",
+        "ℹ️"
+      );
+      return;
+    }
+
+    setGoogleAuthLoading(true, "Connecting to Google...");
+
+    // Try Google Identity Services prompt first if available, else redirect to official authorization endpoint
+    if (window.google?.accounts?.id && googleConfig.client_id) {
+      try {
+        window.google.accounts.id.prompt((notification) => {
+          if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+            window.location.href = `/auth/google/login?mode=${encodeURIComponent(mode)}`;
+          }
+        });
+        setTimeout(() => {
+          if (isAuthLoading && !sessionStorage.getItem("shield_session")) {
+            window.location.href = `/auth/google/login?mode=${encodeURIComponent(mode)}`;
+          }
+        }, 1800);
+        return;
+      } catch (err) {
+        console.warn("GIS prompt error, falling back to OAuth redirect:", err);
+      }
+    }
+
+    // Direct OAuth 2.0 authorization redirect
+    window.location.href = `/auth/google/login?mode=${encodeURIComponent(mode)}`;
+  }
+
+  async function handleGoogleCredentialResponse(response) {
+    if (!response || !response.credential) {
+      showLoginError("Google identity response was empty or cancelled.");
+      setGoogleAuthLoading(false, "Continue with Google");
+      return;
+    }
+
+    setGoogleAuthLoading(true, "Verifying Google Identity...");
+    hideLoginError();
+
+    try {
+      const resp = await fetch("/auth/google/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          credential: response.credential,
+          mode: authMode,
+          device: "Mac / Chrome (Google SSO)",
+        }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        setGoogleAuthLoading(false, "Continue with Google");
+        if (resp.status === 404 && authMode === "signin") {
+          setAuthMode("signup");
+          showLoginError("No LLM Shield account found with this Google identity. Please switch to Sign Up to create your account.", "ℹ️");
+        } else {
+          showLoginError(data.detail || "Google authentication failed. Please try again.");
+        }
+        return;
+      }
+
+      applyAuthenticatedSession(data);
+    } catch (err) {
+      setGoogleAuthLoading(false, "Continue with Google");
+      showLoginError("Gateway communication error during Google verification.");
+      console.error("Google verify error:", err);
+    }
+  }
+
+  async function handleSignInSubmit(e) {
+    e.preventDefault();
+    hideLoginError();
+
+    const identifier = (loginEmail?.value || "").trim();
+    const password = (loginPassword?.value || "");
+
+    if (!identifier) {
+      showLoginError("Please enter your email address or username.");
+      loginEmail?.focus();
+      return;
+    }
+    if (!password) {
+      showLoginError("Please enter your password.");
+      loginPassword?.focus();
+      return;
+    }
+
+    // Set loading state
+    if (btnSubmitSignIn) btnSubmitSignIn.disabled = true;
+    if (signInSpinner) signInSpinner.classList.remove("hidden");
+    if (signInBtnText) signInBtnText.textContent = "Signing in...";
+
     try {
       const resp = await fetch("/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          username: username,
+          email: identifier,
+          username: identifier,
           password: password,
           device: "Mac / Chrome (Corporate)",
         }),
       });
 
+      const data = await resp.json();
+
       if (!resp.ok) {
-        showLoginError("Invalid username or password.");
+        showLoginError(data.detail || "Invalid email or password. Please try again.");
         return;
       }
 
-      const data = await resp.json();
-      state.user = data;
-      sessionStorage.setItem("shield_session", JSON.stringify(data));
-
-      renderSessionUI();
-      loginView.classList.add("hidden");
-      appView.classList.remove("hidden");
-
-      logTerminal("success", `[+] Authentication SUCCESS for user '${data.username}' [Role: ${data.role}]`);
-      logTerminal("info", `[*] Assigned Session ID: ${data.session_id}`);
-      logTerminal("info", `[*] Baseline Risk Calculated: ${data.risk_score}/100 (${data.risk_level})`);
-
-      connectSocWebSocket();
+      applyAuthenticatedSession(data);
     } catch (err) {
-      showLoginError("Gateway communication error. Please ensure server is running.");
-      console.error("Login failed:", err);
+      showLoginError("Unable to reach authentication gateway. Please check your connection.");
+      console.error("Sign In error:", err);
+    } finally {
+      if (btnSubmitSignIn) btnSubmitSignIn.disabled = false;
+      if (signInSpinner) signInSpinner.classList.add("hidden");
+      if (signInBtnText) signInBtnText.textContent = "Sign In";
+    }
+  }
+
+  async function handleSignUpSubmit(e) {
+    e.preventDefault();
+    hideLoginError();
+
+    const fullName = (regFullName?.value || "").trim();
+    const email = (regEmail?.value || "").trim();
+    const password = (regPassword?.value || "");
+    const confirmPassword = (regPasswordConfirm?.value || "");
+
+    if (!fullName) {
+      showLoginError("Please enter your full name.");
+      regFullName?.focus();
+      return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!email || !emailRegex.test(email)) {
+      showLoginError("Please enter a valid corporate email address.");
+      regEmail?.focus();
+      return;
+    }
+
+    if (!password || password.length < 6) {
+      showLoginError("Password must be at least 6 characters long.");
+      regPassword?.focus();
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      showLoginError("Passwords do not match. Please verify your password confirmation.");
+      regPasswordConfirm?.focus();
+      return;
+    }
+
+    // Set loading state
+    if (btnSubmitSignUp) btnSubmitSignUp.disabled = true;
+    if (signUpSpinner) signUpSpinner.classList.remove("hidden");
+    if (signUpBtnText) signUpBtnText.textContent = "Creating Account...";
+
+    try {
+      const resp = await fetch("/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          full_name: fullName,
+          email: email,
+          password: password,
+          password_confirm: confirmPassword,
+          role: "Developer",
+          device: "Mac / Chrome (Corporate)",
+        }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        showLoginError(data.detail || "Registration failed. Please try again.");
+        return;
+      }
+
+      applyAuthenticatedSession(data);
+    } catch (err) {
+      showLoginError("Unable to reach authentication gateway. Please check your connection.");
+      console.error("Sign Up error:", err);
+    } finally {
+      if (btnSubmitSignUp) btnSubmitSignUp.disabled = false;
+      if (signUpSpinner) signUpSpinner.classList.add("hidden");
+      if (signUpBtnText) signUpBtnText.textContent = "Create Account";
+    }
+  }
+
+  function setupPasswordToggle(toggleBtn, inputEl) {
+    if (!toggleBtn || !inputEl) return;
+    toggleBtn.addEventListener("click", () => {
+      const isPwd = inputEl.type === "password";
+      inputEl.type = isPwd ? "text" : "password";
+      toggleBtn.textContent = isPwd ? "🙈" : "👁️";
+    });
+  }
+
+  function applyAuthenticatedSession(userData) {
+    state.user = userData;
+    sessionStorage.setItem("shield_session", JSON.stringify(userData));
+
+    renderSessionUI();
+    loginView?.classList.add("hidden");
+    appView?.classList.remove("hidden");
+
+    logTerminal("success", `[+] Authentication SUCCESS for user '${userData.username}' [Role: ${userData.role}]`);
+    logTerminal("info", `[*] Assigned Session ID: ${userData.session_id}`);
+    logTerminal("info", `[*] Baseline Risk Calculated: ${userData.risk_score}/100 (${userData.risk_level})`);
+
+    connectSocWebSocket();
+    setGoogleAuthLoading(false, "Continue with Google");
+  }
+
+  async function initGoogleAuth() {
+    // 1. Fetch server configuration for Google OAuth
+    try {
+      const cfgResp = await fetch("/auth/google/config");
+      if (cfgResp.ok) {
+        googleConfig = await cfgResp.json();
+      }
+    } catch (err) {
+      console.warn("Could not retrieve Google OAuth config:", err);
+    }
+
+    // 2. Handle URL Query Parameters (from Google OAuth Redirects)
+    const urlParams = new URLSearchParams(window.location.search);
+    const authToken = urlParams.get("auth_token");
+    const authSessionRaw = urlParams.get("auth_session");
+    const authError = urlParams.get("auth_error");
+    const redirectMode = urlParams.get("mode");
+
+    if (redirectMode) {
+      setAuthMode(redirectMode);
+    }
+
+    if (authToken && authSessionRaw) {
+      try {
+        const sessionData = JSON.parse(decodeURIComponent(authSessionRaw));
+        window.history.replaceState({}, document.title, window.location.pathname);
+        applyAuthenticatedSession(sessionData);
+        return;
+      } catch (e) {
+        console.error("Failed to parse session from OAuth callback:", e);
+      }
+    }
+
+    if (authError) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      if (authError === "account_not_found") {
+        setAuthMode("signup");
+        showLoginError("No LLM Shield account found with this Google identity. Please create your account below.", "ℹ️");
+      } else if (authError === "access_denied") {
+        showLoginError("Google authentication was cancelled.", "ℹ️");
+      } else if (authError === "google_not_configured") {
+        showLoginError("Google OAuth is not configured on the server. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env.", "ℹ️");
+      } else if (authError === "unverified_email") {
+        showLoginError("Your Google email is not verified. Please verify your email with Google and try again.", "⚠️");
+      } else {
+        showLoginError(`Google Authentication failed: ${authError.replace(/_/g, " ")}.`, "⚠️");
+      }
+    }
+
+    // 3. Initialize Google Identity Services if client ID is configured and script loaded
+    if (googleConfig.configured && googleConfig.client_id) {
+      const setupGis = () => {
+        if (window.google?.accounts?.id) {
+          try {
+            window.google.accounts.id.initialize({
+              client_id: googleConfig.client_id,
+              callback: handleGoogleCredentialResponse,
+              auto_select: false,
+              cancel_on_tap_outside: true,
+            });
+            const mount = document.getElementById("g_id_signin_mount");
+            if (mount) {
+              window.google.accounts.id.renderButton(mount, {
+                theme: "filled_blue",
+                size: "large",
+                shape: "pill",
+                text: "continue_with",
+                width: 320,
+              });
+            }
+          } catch (e) {
+            console.warn("Error initializing GIS:", e);
+          }
+        }
+      };
+
+      if (window.google?.accounts?.id) {
+        setupGis();
+      } else {
+        window.addEventListener("load", setupGis);
+      }
     }
   }
 
@@ -300,10 +663,10 @@
     }
     state.user = null;
     sessionStorage.removeItem("shield_session");
-    appView.classList.add("hidden");
-    loginView.classList.remove("hidden");
-    passwordInput.value = "";
+    appView?.classList.add("hidden");
+    loginView?.classList.remove("hidden");
     hideLoginError();
+    setGoogleAuthLoading(false, "Continue with Google");
   }
 
   function renderSessionUI() {
@@ -1535,6 +1898,13 @@
     if (ev === "DLP_REDACTION" || ev.includes("DLP") || st === "redacted") {
       return { badge: "OUTBOUND DLP REDACTION", icon: "🟡", color: "yellow-card" };
     }
+    if (
+      te.details?.threat_type === "CONFIDENTIAL_CREDENTIAL_EXTRACTION" ||
+      te.details?.security_analysis?.threat_category === "CONFIDENTIAL_CREDENTIAL_EXTRACTION" ||
+      ev === "CONFIDENTIAL_CREDENTIAL_EXTRACTION"
+    ) {
+      return { badge: "CONFIDENTIAL CREDENTIAL BLOCKED", icon: "🔒", color: "red-card" };
+    }
     if (st === "blocked" || ev.includes("BLOCK") || ev.includes("THREAT") || ev.includes("INJECTION") || ev.includes("MALICIOUS")) {
       return { badge: "ATTACK BLOCKED", icon: "🔴", color: "red-card" };
     }
@@ -1696,51 +2066,41 @@
   // ==========================================================================
 
   function initEventListeners() {
-    // Login form submit
-    loginForm?.addEventListener("submit", (e) => {
-      e.preventDefault();
-      handleLogin(usernameInput.value, passwordInput.value);
-    });
+    // Auth Mode Tabs
+    tabSignIn?.addEventListener("click", () => setAuthMode("signin"));
+    tabSignUp?.addEventListener("click", () => setAuthMode("signup"));
 
-    // Toggle Password visibility
-    togglePasswordBtn?.addEventListener("click", () => {
-      const type = passwordInput.getAttribute("type") === "password" ? "text" : "password";
-      passwordInput.setAttribute("type", type);
-      togglePasswordBtn.textContent = type === "password" ? "👁️" : "🙈";
-    });
-
-    // Quick demo fills
-    window.fillDemoCredentials = function(user, pass) {
-      const uInput = document.getElementById("usernameInput") || usernameInput;
-      const pInput = document.getElementById("passwordInput") || passwordInput;
-      if (uInput) {
-        uInput.value = user;
-        uInput.dispatchEvent(new Event("input", { bubbles: true }));
-        uInput.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-      if (pInput) {
-        pInput.value = pass;
-        pInput.dispatchEvent(new Event("input", { bubbles: true }));
-        pInput.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-      hideLoginError();
-      pInput?.focus();
-    };
-
-    fillDemoDevBtn?.addEventListener("click", (e) => {
+    // Switch links
+    authSwitchLink?.addEventListener("click", (e) => {
       e?.preventDefault();
-      window.fillDemoCredentials("piyush", "Demo@123");
+      setAuthMode("signup");
     });
-
-    fillDemoAdminBtn?.addEventListener("click", (e) => {
+    linkToSignIn?.addEventListener("click", (e) => {
       e?.preventDefault();
-      window.fillDemoCredentials("admin", "Admin@123");
+      setAuthMode("signin");
     });
 
-    // Forgot password modal
-    forgotPasswordBtn?.addEventListener("click", () => forgotModal?.classList.remove("hidden"));
-    closeForgotModalBtn?.addEventListener("click", () => forgotModal?.classList.add("hidden"));
-    closeForgotNoticeBtn?.addEventListener("click", () => forgotModal?.classList.add("hidden"));
+    // Google Buttons (Sign In and Sign Up)
+    btnGoogleAuth?.addEventListener("click", (e) => {
+      e?.preventDefault();
+      triggerGoogleAuth("signin");
+    });
+    btnGoogleAuthSignUp?.addEventListener("click", (e) => {
+      e?.preventDefault();
+      triggerGoogleAuth("signup");
+    });
+
+    // Email/Password Form Submissions
+    signInForm?.addEventListener("submit", handleSignInSubmit);
+    signUpForm?.addEventListener("submit", handleSignUpSubmit);
+
+    // Password Visibility Toggles
+    setupPasswordToggle(toggleLoginPassword, loginPassword);
+    setupPasswordToggle(toggleRegPassword, regPassword);
+    setupPasswordToggle(toggleRegPasswordConfirm, regPasswordConfirm);
+
+    // Initialize Google OAuth config and handle OAuth redirect query parameters
+    initGoogleAuth();
 
     // Logout
     logoutBtn?.addEventListener("click", handleLogout);

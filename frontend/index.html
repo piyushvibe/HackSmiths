@@ -8,11 +8,12 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
   <!-- ==================================================================== -->
-  <!-- 1. LOGIN / AUTHENTICATION VIEW (Default before user authenticates)   -->
+  <!-- 1. LOGIN / AUTHENTICATION VIEW (Google OAuth 2.0 / OpenID Connect)   -->
   <!-- ==================================================================== -->
   <div class="login-wrapper" id="loginView">
     <div class="login-card glass-card">
@@ -23,75 +24,156 @@
         <span class="login-badge">ZERO-TRUST ENTERPRISE PERIMETER</span>
       </div>
 
-      <!-- Authentication Error Alert -->
-      <div class="login-alert hidden" id="loginAlert">
-        <span class="alert-icon">⚠️</span>
-        <span id="loginAlertMsg">Invalid username or password.</span>
+      <!-- Mode Selector Tabs: Sign In / Create Account -->
+      <div class="auth-tabs" role="tablist" aria-label="Authentication Options">
+        <button type="button" class="auth-tab active" id="tabSignIn" role="tab" aria-selected="true">Sign In</button>
+        <button type="button" class="auth-tab" id="tabSignUp" role="tab" aria-selected="false">Create Account</button>
       </div>
 
-      <!-- Login Form -->
-      <form class="login-form" id="loginForm">
-        <div class="form-group">
-          <label for="usernameInput" class="form-label">Corporate Username</label>
-          <div class="input-wrapper">
-            <span class="input-icon">👤</span>
-            <input 
-              type="text" 
-              id="usernameInput" 
-              class="form-input" 
-              placeholder="e.g. piyush or admin" 
-              required 
-              autocomplete="username"
-            >
-          </div>
+      <!-- Authentication Error / Status Alert -->
+      <div class="login-alert hidden" id="loginAlert" role="alert">
+        <span class="alert-icon" id="loginAlertIcon">⚠️</span>
+        <span id="loginAlertMsg">Authentication message</span>
+      </div>
+
+      <!-- ================= SIGN IN VIEW ================= -->
+      <div class="auth-view" id="signInView">
+        <div class="auth-mode-header">
+          <h2 class="auth-mode-title" id="authModeTitle">Sign In</h2>
+          <p class="auth-mode-sub" id="authModeSub">Sign in securely with your Google account or email credentials.</p>
         </div>
 
-        <div class="form-group">
-          <label for="passwordInput" class="form-label">Authentication Password</label>
-          <div class="input-wrapper">
-            <span class="input-icon">🔑</span>
-            <input 
-              type="password" 
-              id="passwordInput" 
-              class="form-input" 
-              placeholder="Enter secure password" 
-              required 
-              autocomplete="current-password"
-            >
-            <button type="button" class="btn-toggle-pwd" id="togglePasswordBtn" title="Show / Hide Password">
-              👁️
-            </button>
-          </div>
-        </div>
-
-        <div class="form-options">
-          <span class="device-label">Device: <span id="loginDeviceTag">Mac / Chrome (Corporate)</span></span>
-          <button type="button" class="btn-link" id="forgotPasswordBtn">Forgot Password?</button>
-        </div>
-
-        <button type="submit" class="btn-submit-login" id="loginSubmitBtn">
-          <span>Sign In to Secure Gateway</span>
-          <span class="arrow-icon">→</span>
-        </button>
-      </form>
-
-      <!-- Pre-seeded Demo Accounts for Judges -->
-      <div class="demo-logins-box">
-        <div class="demo-logins-title">DEMO JUDGE PRE-SEEDED CREDENTIALS:</div>
-        <div class="demo-buttons-row">
-          <button class="btn-demo-chip" id="fillDemoDevBtn" type="button" onclick="if(window.fillDemoCredentials){window.fillDemoCredentials('piyush','Demo@123')}else{var u=document.getElementById('usernameInput'),p=document.getElementById('passwordInput');if(u)u.value='piyush';if(p)p.value='Demo@123';}">
-            <strong>Piyush</strong> (Developer)<br>
-            <small>Demo@123</small>
+        <!-- Google Authentication Action Container -->
+        <div class="google-auth-box">
+          <button type="button" class="btn-google-auth" id="btnGoogleAuth" aria-label="Continue with Google">
+            <svg class="google-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
+              <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.34 24 12 24z"/>
+              <path fill="#FBBC05" d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"/>
+              <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.34 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"/>
+            </svg>
+            <span class="google-btn-text" id="googleBtnLabel">Continue with Google</span>
+            <div class="google-spinner hidden" id="googleSpinner" aria-label="Loading"></div>
           </button>
-          <button class="btn-demo-chip" id="fillDemoAdminBtn" type="button" onclick="if(window.fillDemoCredentials){window.fillDemoCredentials('admin','Admin@123')}else{var u=document.getElementById('usernameInput'),p=document.getElementById('passwordInput');if(u)u.value='admin';if(p)p.value='Admin@123';}">
-            <strong>Admin</strong> (Security Admin)<br>
-            <small>Admin@123</small>
+        </div>
+
+        <!-- OR Divider -->
+        <div class="auth-divider">
+          <span class="auth-divider-line"></span>
+          <span class="auth-divider-text">OR</span>
+          <span class="auth-divider-line"></span>
+        </div>
+
+        <!-- Sign In Form -->
+        <form class="login-form" id="signInForm" novalidate>
+          <div class="form-group">
+            <label class="form-label" for="loginEmail">Email Address or Username</label>
+            <div class="input-wrapper">
+              <span class="input-icon">✉️</span>
+              <input type="text" class="form-input" id="loginEmail" placeholder="name@company.com" autocomplete="username" required />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="loginPassword">Password</label>
+            <div class="input-wrapper">
+              <span class="input-icon">🔒</span>
+              <input type="password" class="form-input" id="loginPassword" placeholder="••••••••" autocomplete="current-password" required />
+              <button type="button" class="btn-toggle-pwd" id="toggleLoginPassword" aria-label="Toggle password visibility">👁️</button>
+            </div>
+          </div>
+
+          <button type="submit" class="btn-submit-auth" id="btnSubmitSignIn">
+            <span id="signInBtnText">Sign In</span>
+            <div class="auth-btn-spinner hidden" id="signInSpinner"></div>
           </button>
+        </form>
+
+        <!-- Secondary Navigation Link -->
+        <div class="auth-switch-prompt" id="authSwitchPrompt">
+          <span id="authSwitchText">New to LLM Shield?</span>
+          <button type="button" class="btn-link auth-switch-link" id="authSwitchLink">Create an account</button>
+        </div>
+      </div>
+
+      <!-- ================= SIGN UP VIEW ================= -->
+      <div class="auth-view hidden" id="signUpView">
+        <div class="auth-mode-header">
+          <h2 class="auth-mode-title">Create Your Account</h2>
+          <p class="auth-mode-sub">Create your LLM Shield account using Google or email credentials.</p>
+        </div>
+
+        <!-- Google Authentication Action Container -->
+        <div class="google-auth-box">
+          <button type="button" class="btn-google-auth" id="btnGoogleAuthSignUp" aria-label="Continue with Google">
+            <svg class="google-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
+              <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.34 24 12 24z"/>
+              <path fill="#FBBC05" d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"/>
+              <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.34 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"/>
+            </svg>
+            <span class="google-btn-text">Continue with Google</span>
+            <div class="google-spinner hidden" id="googleSpinnerSignUp" aria-label="Loading"></div>
+          </button>
+        </div>
+
+        <!-- OR Divider -->
+        <div class="auth-divider">
+          <span class="auth-divider-line"></span>
+          <span class="auth-divider-text">OR</span>
+          <span class="auth-divider-line"></span>
+        </div>
+
+        <!-- Sign Up Form -->
+        <form class="login-form" id="signUpForm" novalidate>
+          <div class="form-group">
+            <label class="form-label" for="regFullName">Full Name</label>
+            <div class="input-wrapper">
+              <span class="input-icon">👤</span>
+              <input type="text" class="form-input" id="regFullName" placeholder="Alex Morgan" autocomplete="name" required />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="regEmail">Email Address</label>
+            <div class="input-wrapper">
+              <span class="input-icon">✉️</span>
+              <input type="email" class="form-input" id="regEmail" placeholder="name@company.com" autocomplete="email" required />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="regPassword">Password</label>
+            <div class="input-wrapper">
+              <span class="input-icon">🔒</span>
+              <input type="password" class="form-input" id="regPassword" placeholder="Min. 6 characters" autocomplete="new-password" required />
+              <button type="button" class="btn-toggle-pwd" id="toggleRegPassword" aria-label="Toggle password visibility">👁️</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="regPasswordConfirm">Confirm Password</label>
+            <div class="input-wrapper">
+              <span class="input-icon">🔐</span>
+              <input type="password" class="form-input" id="regPasswordConfirm" placeholder="Re-enter password" autocomplete="new-password" required />
+              <button type="button" class="btn-toggle-pwd" id="toggleRegPasswordConfirm" aria-label="Toggle confirm password visibility">👁️</button>
+            </div>
+          </div>
+
+          <button type="submit" class="btn-submit-auth" id="btnSubmitSignUp">
+            <span id="signUpBtnText">Create Account</span>
+            <div class="auth-btn-spinner hidden" id="signUpSpinner"></div>
+          </button>
+        </form>
+
+        <div class="auth-switch-prompt">
+          <span>Already have an account?</span>
+          <button type="button" class="btn-link auth-switch-link" id="linkToSignIn">Sign in</button>
         </div>
       </div>
 
       <div class="login-footer">
-        <span>Protected by SHA-256 HMAC &bull; Adaptive Risk Engine &bull; Streaming DLP</span>
+        <span>Protected by Zero-Trust AI Security Gateway &bull; Google SSO &bull; PBKDF2</span>
       </div>
     </div>
   </div>
@@ -834,30 +916,6 @@
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================================================================== -->
-  <!-- 6. FORGOT PASSWORD INFORMATIONAL MODAL                               -->
-  <!-- ==================================================================== -->
-  <div class="modal-overlay hidden" id="forgotModal">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="modal-title">
-          <span class="icon">ℹ️</span>
-          <span>Enterprise Credential Recovery</span>
-        </div>
-        <button class="modal-close" id="closeForgotModalBtn">&times;</button>
-      </div>
-      <div class="modal-body">
-        <p>In accordance with LLM-Shield enterprise governance policies, self-service password resets are restricted to prevent account takeover.</p>
-        <div class="info-box">
-          <strong>Demo Evaluation Accounts:</strong><br>
-          • Developer: <code>piyush</code> / <code>Demo@123</code><br>
-          • Security Admin: <code>admin</code> / <code>Admin@123</code>
-        </div>
-        <button class="btn-primary full-width" id="closeForgotNoticeBtn">Return to Sign In</button>
       </div>
     </div>
   </div>

@@ -74,6 +74,24 @@ def classify_requested_resource(prompt_text: str) -> Dict[str, Any]:
         }
 
     # Level 3: CONFIDENTIAL / PII
+    if any(k in lower for k in [
+        "password", "passwords", "passcode", "credentials", "master password",
+        "system password", "admin password", "root password", "database password",
+        "vault password", "wifi password", "login password", "sudo password",
+        "stored password", "supervisor password"
+    ]) and not any(k in lower for k in [
+        "policy", "manager", "guideline", "guidelines", "best practice", "best practices",
+        "practices", "how to choose", "definition", "algorithm", "complexity", "hashing", "hash", "bcrypt"
+    ]):
+        return {
+            "resource_id": "CONFIDENTIAL_SYSTEM_PASSWORDS",
+            "name": "Confidential System Credentials & Passwords",
+            "sensitivity": "CONFIDENTIAL",
+            "level": "LEVEL 3: CONFIDENTIAL",
+            "description": "Confidential system passwords and authentication credentials",
+            "required_permission": "SYSTEM_PASSWORD_READ",
+        }
+
     if any(k in lower for k in ["address", "give me the address", "rahul's address", "rahul address", "customer address", "home address", "residential address", "user address"]):
         return {
             "resource_id": "ADDRESS",
@@ -216,14 +234,23 @@ def evaluate_security_policy(
         final_decision = "BLOCK"
         final_action = "BLOCKED"
         final_action_display = "🚫 BLOCKED"
-        decision_badge = "❌ THREAT BLOCKED"
-        status_headline = "Adversarial Prompt Blocked"
-        authorization = "NOT REACHED / BLOCKED BY PROMPT SECURITY"
-        authorization_display = "NOT REACHED / BLOCKED BY PROMPT SECURITY"
-        reason = (
-            f"Adversarial prompt detected ({threat_category}). "
-            f"Prompt security layer blocked request. Low session risk ({session_risk}/100) does not bypass prompt injection defense."
-        )
+        if threat_category == "CONFIDENTIAL_CREDENTIAL_EXTRACTION":
+            decision_badge = "🔒 CONFIDENTIAL BLOCKED"
+            status_headline = "Confidential Credential Extraction Blocked"
+            authorization = "NOT REACHED / BLOCKED BY CONFIDENTIAL SECURITY"
+            authorization_display = "NOT REACHED / BLOCKED BY CONFIDENTIAL SECURITY"
+            reason = (
+                "Confidential credential extraction attempt detected. System passwords and authentication credentials cannot be queried or exposed through the LLM."
+            )
+        else:
+            decision_badge = "❌ THREAT BLOCKED"
+            status_headline = "Adversarial Prompt Blocked"
+            authorization = "NOT REACHED / BLOCKED BY PROMPT SECURITY"
+            authorization_display = "NOT REACHED / BLOCKED BY PROMPT SECURITY"
+            reason = (
+                f"Adversarial prompt detected ({threat_category}). "
+                f"Prompt security layer blocked request. Low session risk ({session_risk}/100) does not bypass prompt injection defense."
+            )
 
     # RULE 2: SUSPICIOUS SESSION (Session Risk HIGH, e.g. Stolen Credentials)
     elif session_risk >= 61:

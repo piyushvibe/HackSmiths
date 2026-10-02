@@ -11,8 +11,8 @@ from backend.schemas import DecloakResult
 # Zero-width and invisible character regex
 ZERO_WIDTH_REGEX = re.compile(r"[\u200B\u200C\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2060\u00AD]")
 
-# Candidate Base64 pattern (minimum length 8 chars)
-BASE64_CANDIDATE_REGEX = re.compile(r"(?:[A-Za-z0-9+/]{4}){2,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
+# Candidate Base64 pattern (minimum length 8 chars with delimiter boundaries)
+BASE64_CANDIDATE_REGEX = re.compile(r"(?<![A-Za-z0-9+/])(?:[A-Za-z0-9+/]{4}){2,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/])")
 
 # High-signal adversarial keywords that indicate ROT13 obfuscation when unmasked
 ROT13_TARGET_KEYWORDS = {
@@ -40,13 +40,17 @@ def strip_invisible_characters(text: str) -> Tuple[str, bool]:
 
 
 def is_printable_text(raw_bytes: bytes) -> bool:
-    """Check if raw decoded bytes represent printable UTF-8 text."""
+    """Check if raw decoded bytes represent meaningful, printable text."""
     try:
         decoded = raw_bytes.decode("utf-8")
-        # Check that high proportion of characters are printable / common whitespace
-        printable_count = sum(1 for c in decoded if c.isprintable() or c in "\r\n\t ")
-        if len(decoded) > 0 and (printable_count / len(decoded)) > 0.85:
-            return True
+        # Must be mostly printable ASCII or common whitespace
+        ascii_printable = sum(1 for c in decoded if 32 <= ord(c) <= 126 or c in "\r\n\t")
+        if len(decoded) > 0 and (ascii_printable / len(decoded)) >= 0.85:
+            # Must contain at least one meaningful word
+            words = [w for w in decoded.split() if w.isalpha() and len(w) >= 3]
+            if len(decoded) < 8:
+                return len(words) >= 1 and all(ord(c) < 128 for c in decoded)
+            return len(words) >= 1
     except UnicodeDecodeError:
         return False
     return False

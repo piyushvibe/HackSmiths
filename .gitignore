@@ -40,3 +40,6 @@ htmlcov/
 *.swo
 .DS_Store
 
+# Vercel
+.vercel/
+

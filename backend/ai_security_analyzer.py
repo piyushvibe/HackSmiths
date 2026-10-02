@@ -32,6 +32,7 @@ AllowedThreatType = Literal[
     "PROMPT_INJECTION",
     "JAILBREAK",
     "SYSTEM_PROMPT_EXTRACTION",
+    "CONFIDENTIAL_CREDENTIAL_EXTRACTION",
     "CREDENTIAL_REQUEST",
     "SECRET_EXFILTRATION",
     "PII_EXPOSURE",
@@ -49,6 +50,7 @@ ALLOWED_THREAT_TYPES = {
     "PROMPT_INJECTION",
     "JAILBREAK",
     "SYSTEM_PROMPT_EXTRACTION",
+    "CONFIDENTIAL_CREDENTIAL_EXTRACTION",
     "CREDENTIAL_REQUEST",
     "SECRET_EXFILTRATION",
     "PII_EXPOSURE",
@@ -187,6 +189,33 @@ def _detect_semantic_intent_locally(
     if has_multi_step:
         signals.append("multi_step_manipulation")
 
+    is_educational = any(k in lower for k in [
+        "policy", "manager", "guideline", "guidelines", "best practice", "recommend",
+        "how to create", "how to choose", "definition", "algorithm", "complexity", "hashing", "bcrypt"
+    ])
+
+    has_confidential_pw_extraction = (not is_educational) and (not any(k in lower for k in ["aws secret", "aws key", "cloud secret"])) and (
+        guard_verdict.threat_type == "CONFIDENTIAL_CREDENTIAL_EXTRACTION"
+        or deberta_res["label"] == "CONFIDENTIAL_CREDENTIAL_EXTRACTION"
+        or any(k in lower for k in [
+            "password in the system", "system password", "admin password", "root password",
+            "master password", "database password", "db password", "vault password",
+            "wifi password", "stored password", "dump all passwords", "reveal the root password",
+            "tell me the password", "what is the password in the system", "sudo password",
+            "supervisor account password", "give me the password", "system administrator password"
+        ])
+        or bool(re.search(r"\b(?:give|tell|reveal|show|print|dump|extract|provide)\s+(?:me\s+)?(?:the\s+)?(?:system\s+)?passwords?\b", lower))
+    )
+
+    if has_confidential_pw_extraction:
+        signals.append("confidential_credential_intent")
+        signals.append("password_harvesting_attempt")
+        # Prototype Active Learning: dynamically index this pattern into the vector store
+        try:
+            semantic_detector.learn_pattern(clean_text, "CONFIDENTIAL_CREDENTIAL_EXTRACTION")
+        except Exception:
+            pass
+
     # Check for hardcoded API keys/secrets or credit cards in input for REDACT decision
     contains_api_key = bool(re.search(r"\b(?:sk-[a-zA-Z0-9_\-]{20,}|AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36})\b", clean_text))
     contains_cc = bool(re.search(r"\b(?:\d{4}[ -]?){3}\d{4}\b", clean_text))
@@ -210,12 +239,15 @@ def _detect_semantic_intent_locally(
     threat_type: AllowedThreatType = "NONE"
     reason = "Request analyzed: No malicious or adversarial intent detected."
 
-    # Priority 1: Clear Adversarial Threats (Jailbreak / Prompt Injection / Canary Theft)
-    if guard_verdict.is_malicious or has_override or has_extraction or deberta_res["label"] in ("PROMPT_INJECTION", "JAILBREAK"):
+    # Priority 1: Clear Adversarial Threats (Jailbreak / Prompt Injection / Canary Theft / Confidential Credential Theft)
+    if guard_verdict.is_malicious or has_override or has_extraction or has_confidential_pw_extraction or deberta_res["label"] in ("PROMPT_INJECTION", "JAILBREAK", "CONFIDENTIAL_CREDENTIAL_EXTRACTION"):
         decision = "BLOCK"
-        confidence = max(0.92, round(sim_score, 2) if sim_score > 0 else 0.94)
-        risk_score = max(85, int(confidence * 95))
-        if "dan" in lower or "jailbreak" in lower or has_override:
+        confidence = max(0.95, round(sim_score, 2) if sim_score > 0 else 0.96)
+        risk_score = max(88, int(confidence * 95))
+        if has_confidential_pw_extraction or guard_verdict.threat_type == "CONFIDENTIAL_CREDENTIAL_EXTRACTION" or deberta_res["label"] == "CONFIDENTIAL_CREDENTIAL_EXTRACTION":
+            threat_type = "CONFIDENTIAL_CREDENTIAL_EXTRACTION"
+            reason = "Confidential credential extraction attempt: prompt requests system passwords, secrets, or administrative access credentials."
+        elif "dan" in lower or "jailbreak" in lower or has_override:
             threat_type = "JAILBREAK" if "dan" in lower else "PROMPT_INJECTION"
             reason = "The request attempts to override system instructions and bypass security guidelines."
         elif has_extraction:

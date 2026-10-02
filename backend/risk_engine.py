@@ -167,7 +167,7 @@ def recalculate_risk(
             decision = getattr(ai_analysis, "decision", "PASS") if hasattr(ai_analysis, "decision") else ai_analysis.get("decision", "PASS")
 
             # Scale effective prompt risk by confidence
-            if decision == "BLOCK" or threat_type in ("PROMPT_INJECTION", "JAILBREAK", "SYSTEM_PROMPT_EXTRACTION"):
+            if decision == "BLOCK" or threat_type in ("PROMPT_INJECTION", "JAILBREAK", "SYSTEM_PROMPT_EXTRACTION", "CONFIDENTIAL_CREDENTIAL_EXTRACTION"):
                 ai_prompt_risk = max(30, int(35 * confidence))
             elif decision == "CHALLENGE" or threat_type == "SUSPICIOUS_BEHAVIOR":
                 ai_prompt_risk = int(20 * confidence)
@@ -180,7 +180,7 @@ def recalculate_risk(
             factors.prompt_risk = min(35, max(factors.prompt_risk, ai_prompt_risk))
         elif prompt_text and len(prompt_text) > 0:
             lower = prompt_text.lower()
-            if any(k in lower for k in ["admin", "root", "bypass", "system prompt", "override", "leak", "dump"]):
+            if any(k in lower for k in ["admin", "root", "bypass", "system prompt", "override", "leak", "dump", "password", "credential", "secret"]):
                 factors.prompt_risk = min(30, factors.prompt_risk + 15)
             else:
                 factors.prompt_risk = max(0, factors.prompt_risk - 5)
@@ -189,7 +189,11 @@ def recalculate_risk(
         ai_data_risk = 0
         if ai_analysis:
             threat_type = getattr(ai_analysis, "threat_type", "") if hasattr(ai_analysis, "threat_type") else ai_analysis.get("threat_type", "")
-            if threat_type in ("CREDENTIAL_REQUEST", "SECRET_EXFILTRATION", "DATA_EXFILTRATION"):
+            if threat_type == "CONFIDENTIAL_CREDENTIAL_EXTRACTION":
+                ai_data_risk = 30
+                # Escalating behavioral penalty for direct credential probing
+                factors.behavior_risk = min(35, factors.behavior_risk + 15)
+            elif threat_type in ("CREDENTIAL_REQUEST", "SECRET_EXFILTRATION", "DATA_EXFILTRATION"):
                 ai_data_risk = 25
             elif threat_type == "PII_EXPOSURE":
                 ai_data_risk = 20
@@ -219,6 +223,7 @@ PROTOTYPE_RISK_WEIGHTS: Dict[str, int] = {
     "valid_hmac": -10,
     "suspicious_prompt": 25,
     "credential_extraction": 30,
+    "confidential_credential_extraction": 30,
     "unusual_behavior": 15,
     "untrusted_device": 25,
 }

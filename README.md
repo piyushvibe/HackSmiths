@@ -281,8 +281,54 @@ tests/test_outbound.py               ..............                       [ 75%]
 tests/test_passkey_verification.py   .......                              [ 83%]
 tests/test_policy_engine.py          ..............                       [ 99%]
 tests/test_shield.py                 .                                    [100%]
-============================== 89 passed in 0.84s ==============================
+======================= 132 passed, 2 warnings in 5.88s ========================
 ```
+
+---
+
+## 🚀 Deploying to Vercel
+
+LLM-Shield is configured for serverless deployment on **Vercel** with zero-configuration Python ASGI support and SQLite `/tmp` writable storage.
+
+### 1. Prerequisites
+- A [Vercel account](https://vercel.com)
+- Optional: [Vercel CLI](https://vercel.com/docs/cli) installed (`npm i -g vercel`)
+
+### 2. Deploy via Vercel CLI
+
+```bash
+# 1. Login to Vercel
+vercel login
+
+# 2. Deploy to preview
+vercel
+
+# 3. Deploy to production
+vercel --prod
+```
+
+### 3. Deploy via GitHub Integration
+1. Push your repository to GitHub.
+2. In the [Vercel Dashboard](https://vercel.com/new), click **Import Project** and select your repository.
+3. Keep the default settings (Framework Preset: **Other**; Root Directory: `./`).
+4. Configure the Environment Variables (see below).
+5. Click **Deploy**.
+
+### 4. Required Environment Variables on Vercel
+
+Set these in your Vercel Project Settings (**Settings** -> **Environment Variables**):
+
+| Variable | Description | Example |
+|---|---|---|
+| `SHIELD_SECRET_KEY` | HMAC token signing secret | `your-cryptographic-secret` |
+| `APP_BASE_URL` | Your public Vercel URL | `https://your-project.vercel.app` |
+| `GOOGLE_CLIENT_ID` | Google OAuth 2.0 Web Client ID | `xxxxxxxx.apps.googleusercontent.com` |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 Client Secret | `GOCSPX-xxxxxxxxxxxxxxxx` |
+| `GOOGLE_CALLBACK_URL` | OAuth redirect URI | `https://your-project.vercel.app/auth/google/callback` |
+| `OLLAMA_BASE_URL` | *(Optional)* Remote Ollama or LLM API | `https://your-ollama-host.com` |
+
+> [!NOTE]
+> **Serverless SQLite Handling**: On Vercel, the lambda filesystem outside `/tmp` is read-only. LLM-Shield automatically detects Vercel (`VERCEL=1`) and initializes/copies the seed database into `/tmp/llm_shield.db`, ensuring all user sessions, audit logs, and authentication records remain fully functional.
 
 ---
 

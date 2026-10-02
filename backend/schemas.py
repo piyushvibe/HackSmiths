@@ -97,10 +97,42 @@ class BlockedResponse(BaseModel):
 
 class LoginRequest(BaseModel):
     """Credentials payload for /auth/login."""
-    username: str
+    username: Optional[str] = None
+    email: Optional[str] = None
     password: str
     device: Optional[str] = "Mac / Chrome (Corporate)"
     ip_address: Optional[str] = "127.0.0.1"
+
+
+class RegisterRequest(BaseModel):
+    """Payload for user registration /auth/register."""
+    username: Optional[str] = None
+    email: Optional[str] = None
+    password: str
+    password_confirm: Optional[str] = None
+    full_name: str
+    role: Optional[str] = "Developer"
+    device: Optional[str] = "Mac / Chrome (Corporate)"
+    ip_address: Optional[str] = "127.0.0.1"
+
+
+class GoogleAuthRequest(BaseModel):
+    """Payload for Google SSO /auth/google."""
+    credential: Optional[str] = Field(None, description="Google OpenID Connect ID token / JWT")
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    google_id: Optional[str] = None
+    mode: str = Field(default="signin", description="Authentication mode: 'signin' or 'signup'")
+    device: Optional[str] = "Mac / Chrome (Google SSO)"
+    ip_address: Optional[str] = "127.0.0.1"
+
+
+class GoogleConfigResponse(BaseModel):
+    """Configuration descriptor for Google OAuth."""
+    client_id: str
+    configured: bool
+    auth_url: str
+    message: Optional[str] = None
 
 
 class LoginResponse(BaseModel):

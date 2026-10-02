@@ -1,19 +1,42 @@
 """FastAPI main application for LLM-Shield core proxy."""
 
 import asyncio
+import json
 import logging
 import os
+import secrets
 import time
-from typing import Set
+from typing import Optional, Set
+from urllib.parse import quote, urlencode
+
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend.auth import verify_signature, verify_shield_auth
+from backend.google_auth import (
+    verify_google_id_token,
+    exchange_google_auth_code,
+    get_google_client_id,
+    get_google_client_secret,
+    get_google_callback_url,
+    get_app_base_url,
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_CALLBACK_URL,
+    APP_BASE_URL,
+)
 from backend.database import (
     authenticate_user,
+    register_user,
+    authenticate_or_register_google_user,
+    authenticate_google_signin,
+    register_google_signup,
     create_user_session,
     get_session_by_token,
     verify_session_mfa,
@@ -51,6 +74,9 @@ from backend.schemas import (
     ShieldRequest,
     TelemetryEvent,
     LoginRequest,
+    RegisterRequest,
+    GoogleAuthRequest,
+    GoogleConfigResponse,
     LoginResponse,
     MfaVerifyRequest,
     PasskeyVerifyRequest,
@@ -139,9 +165,20 @@ async def health_check():
 
 @app.post("/auth/login", response_model=LoginResponse)
 async def login_endpoint(payload: LoginRequest):
-    """Authenticates credentials against secure PBKDF2 hashed storage."""
+    """Authenticates credentials (email or username) against secure PBKDF2 hashed storage."""
+    identifier = (payload.email or payload.username or "").strip()
+    if not identifier:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username or email is required.",
+        )
+    if not payload.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password is required.",
+        )
     user = authenticate_user(
-        payload.username,
+        identifier,
         payload.password,
         device=payload.device or "Mac / Chrome (Corporate)",
         ip_address=payload.ip_address or "127.0.0.1",
@@ -170,6 +207,305 @@ async def login_endpoint(payload: LoginRequest):
                 "device": session["device"],
                 "risk_score": factors.total,
                 "risk_level": factors.level,
+            },
+        )
+    )
+
+    return LoginResponse(
+        token=session["token"],
+        user_id=session["user_id"],
+        username=session["username"],
+        role=session["role"],
+        full_name=session["full_name"],
+        session_id=session["session_id"],
+        risk_score=factors.total,
+        risk_level=factors.level,
+        access_decision="ACCESS_GRANTED" if factors.total <= 30 else ("VERIFICATION_REQUIRED" if factors.total <= 60 else "ACCESS_RESTRICTED"),
+        device=session["device"],
+        login_time=session["login_time"],
+        mfa_verified=session["mfa_verified"],
+    )
+
+
+@app.post("/auth/register", response_model=LoginResponse)
+async def register_endpoint(payload: RegisterRequest):
+    """Registers a new corporate user and establishes an initial authenticated session."""
+    if payload.password_confirm and payload.password != payload.password_confirm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Passwords do not match. Please verify your password confirmation.",
+        )
+
+    clean_email = (payload.email or "").strip().lower()
+    raw_user = (payload.username or "").strip().lower()
+    if not clean_email and "@" in raw_user:
+        clean_email = raw_user
+        clean_username = clean_email.split("@")[0]
+    elif raw_user and "@" not in raw_user:
+        clean_username = raw_user
+    else:
+        clean_username = clean_email.split("@")[0] if clean_email else ""
+
+    user, err = register_user(
+        username=clean_username,
+        password=payload.password,
+        full_name=payload.full_name,
+        email=clean_email or None,
+        role="Developer",  # Least-privileged default role
+        device=payload.device or "Mac / Chrome (Corporate)",
+        ip_address=payload.ip_address or "127.0.0.1",
+    )
+    if err or not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=err or "Registration failed. Invalid username or password format.",
+        )
+    
+    session = create_user_session(
+        user["id"],
+        device=payload.device or "Mac / Chrome (Corporate)",
+        ip_address=payload.ip_address or "127.0.0.1",
+    )
+    factors = recalculate_risk(session["session_id"])
+
+    await soc_manager.broadcast(
+        TelemetryEvent(
+            event="USER_REGISTERED",
+            user_id=user["username"],
+            session_id=session["session_id"],
+            status="allowed",
+            details={
+                "role": user["role"],
+                "full_name": user["full_name"],
+                "device": session["device"],
+                "auth_method": "PBKDF2-HMAC-SHA256",
+            },
+        )
+    )
+
+    return LoginResponse(
+        token=session["token"],
+        user_id=session["user_id"],
+        username=session["username"],
+        role=session["role"],
+        full_name=session["full_name"],
+        session_id=session["session_id"],
+        risk_score=factors.total,
+        risk_level=factors.level,
+        access_decision="ACCESS_GRANTED" if factors.total <= 30 else ("VERIFICATION_REQUIRED" if factors.total <= 60 else "ACCESS_RESTRICTED"),
+        device=session["device"],
+        login_time=session["login_time"],
+        mfa_verified=session["mfa_verified"],
+    )
+
+
+@app.get("/auth/google/config", response_model=GoogleConfigResponse)
+async def google_config_endpoint():
+    """Returns Google OAuth configuration and readiness."""
+    client_id = get_google_client_id()
+    secret = get_google_client_secret()
+    configured = bool(client_id and secret)
+    message = (
+        "Google OAuth 2.0 is configured and active."
+        if configured
+        else "Google OAuth configuration is missing on the server. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the server .env file."
+    )
+    return GoogleConfigResponse(
+        client_id=client_id if configured else "",
+        configured=configured,
+        auth_url="/auth/google/login",
+        message=message,
+    )
+
+
+@app.get("/auth/google/login")
+async def google_login_redirect(mode: str = "signin"):
+    """Redirects user to Google OAuth 2.0 authorization endpoint."""
+    client_id = get_google_client_id()
+    secret = get_google_client_secret()
+    if not client_id or not secret:
+        return RedirectResponse(url="/?auth_error=google_not_configured")
+
+    clean_mode = "signup" if str(mode).lower() == "signup" else "signin"
+    state_token = f"{clean_mode}:{secrets.token_urlsafe(16)}"
+    
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": get_google_callback_url(),
+        "scope": "openid email profile",
+        "state": state_token,
+        "access_type": "online",
+        "prompt": "select_account",
+    }
+    google_auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+    return RedirectResponse(url=google_auth_url)
+
+
+@app.get("/auth/google/callback")
+async def google_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """Handles OAuth 2.0 callback from Google, exchanges code for ID token, and logs in user."""
+    if error:
+        err_msg = "access_denied" if "access_denied" in str(error) else str(error)
+        return RedirectResponse(url=f"/?auth_error={err_msg}")
+
+    if not code:
+        return RedirectResponse(url="/?auth_error=missing_code")
+
+    # Extract mode from state
+    mode = "signin"
+    if state and ":" in state:
+        mode = state.split(":")[0]
+
+    # Exchange code for tokens
+    tokens = await exchange_google_auth_code(code)
+    if not tokens or "id_token" not in tokens:
+        return RedirectResponse(url="/?auth_error=token_exchange_failed")
+
+    # Verify ID token
+    verified_payload = await verify_google_id_token(tokens["id_token"])
+    if not verified_payload:
+        return RedirectResponse(url="/?auth_error=invalid_token")
+
+    google_id = verified_payload.get("sub", "")
+    email = verified_payload.get("email", "")
+    full_name = verified_payload.get("name") or email.split("@")[0].title()
+
+    if mode == "signup":
+        user, err = register_google_signup(
+            google_id=google_id,
+            email=email,
+            full_name=full_name,
+            device="Mac / Chrome (Google SSO)",
+        )
+    else:
+        user, err = authenticate_google_signin(
+            google_id=google_id,
+            email=email,
+            device="Mac / Chrome (Google SSO)",
+        )
+
+    if err == "ACCOUNT_NOT_FOUND":
+        return RedirectResponse(url=f"/?auth_error=account_not_found&mode=signup&email={quote(email)}")
+    
+    if err or not user:
+        return RedirectResponse(url=f"/?auth_error={quote(err or 'auth_failed')}")
+
+    session = create_user_session(user["id"], device="Mac / Chrome (Google SSO)")
+    recalculate_risk(session["session_id"])
+
+    await soc_manager.broadcast(
+        TelemetryEvent(
+            event="GOOGLE_SSO_LOGIN",
+            user_id=user["username"],
+            session_id=session["session_id"],
+            status="allowed",
+            details={
+                "email": email,
+                "role": user["role"],
+                "auth_provider": "Google OAuth 2.0",
+                "mode": mode,
+            },
+        )
+    )
+
+    session_data = json.dumps({
+        "token": session["token"],
+        "user_id": session["user_id"],
+        "username": session["username"],
+        "role": session["role"],
+        "full_name": session["full_name"],
+        "session_id": session["session_id"],
+        "risk_score": session["risk_score"],
+        "risk_level": session["risk_level"],
+        "access_decision": "ACCESS_GRANTED",
+        "device": session["device"],
+        "login_time": session["login_time"],
+        "mfa_verified": False,
+    })
+    return RedirectResponse(url=f"/?auth_token={quote(session['token'])}&auth_session={quote(session_data)}")
+
+
+@app.post("/auth/google", response_model=LoginResponse)
+@app.post("/auth/google/verify", response_model=LoginResponse)
+async def google_auth_endpoint(payload: GoogleAuthRequest):
+    """Authenticates or registers user via Google SSO (GIS ID Token or verified payload)."""
+    mode = (payload.mode or "signin").strip().lower()
+    google_id = payload.google_id
+    email = payload.email
+    full_name = payload.full_name
+
+    # If client passed a Google ID token from Google Identity Services
+    if payload.credential:
+        verified = await verify_google_id_token(payload.credential)
+        if not verified:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Google identity verification failed. Invalid ID token or unverified email.",
+            )
+        google_id = verified.get("sub")
+        email = verified.get("email")
+        full_name = verified.get("name") or (email.split("@")[0].title() if email else "Google User")
+
+    if not email or "@" not in email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Valid email address is required for Google authentication.",
+        )
+
+    # Execute Sign In or Sign Up
+    if mode == "signup":
+        user, err = register_google_signup(
+            google_id=google_id or "",
+            email=email,
+            full_name=full_name,
+            device=payload.device or "Mac / Chrome (Google SSO)",
+            ip_address=payload.ip_address or "127.0.0.1",
+        )
+    else:
+        user, err = authenticate_google_signin(
+            google_id=google_id or "",
+            email=email,
+            device=payload.device or "Mac / Chrome (Google SSO)",
+            ip_address=payload.ip_address or "127.0.0.1",
+        )
+
+    if err == "ACCOUNT_NOT_FOUND":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No LLM Shield account found with this Google identity. Please switch to Sign Up to create your account.",
+        )
+
+    if err or not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=err or "Google authentication failed.",
+        )
+
+    session = create_user_session(
+        user["id"],
+        device=payload.device or "Mac / Chrome (Google SSO)",
+        ip_address=payload.ip_address or "127.0.0.1",
+    )
+    factors = recalculate_risk(session["session_id"])
+
+    await soc_manager.broadcast(
+        TelemetryEvent(
+            event="GOOGLE_SSO_LOGIN",
+            user_id=user["username"],
+            session_id=session["session_id"],
+            status="allowed",
+            details={
+                "email": email,
+                "role": user["role"],
+                "auth_provider": "Google Identity Services",
+                "device": session["device"],
+                "risk_score": factors.total,
+                "mode": mode,
             },
         )
     )
@@ -1103,6 +1439,10 @@ async def upstream_status():
 
 # Mount static frontend assets and dedicated view routes for web UI
 frontend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
+if not os.path.exists(frontend_dir):
+    cwd_frontend = os.path.join(os.getcwd(), "frontend")
+    if os.path.exists(cwd_frontend):
+        frontend_dir = cwd_frontend
 
 @app.get("/user")
 @app.get("/chatbot")
