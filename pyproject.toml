@@ -16,6 +16,12 @@ dependencies = [
 [tool.uv]
 package = false
 
+[tool.vercel]
+entrypoint = "backend.main:app"
+
+[tool.fastapi]
+entrypoint = "backend.main:app"
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

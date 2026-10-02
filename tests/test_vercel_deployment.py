@@ -2,12 +2,14 @@
 
 import os
 from fastapi.testclient import TestClient
-from api.index import app
+from backend.main import app
 from backend.database import get_db_path, SOURCE_DB_PATH
+import tomllib
+import json
 
 
 def test_vercel_entrypoint_loads():
-    """Verify api.index:app loads and serves routes correctly."""
+    """Verify backend.main:app loads and serves routes correctly."""
     client = TestClient(app)
 
     # 1. Health check
@@ -36,3 +38,18 @@ def test_vercel_tmp_database_path(monkeypatch):
     path = get_db_path()
     assert path == "/tmp/llm_shield.db"
     assert os.path.exists("/tmp/llm_shield.db")
+
+
+def test_vercel_config_entrypoint_matches():
+    """Verify vercel.json and pyproject.toml both explicitly target backend.main:app."""
+    # 1. Verify pyproject.toml
+    with open("pyproject.toml", "rb") as f:
+        pyproj = tomllib.load(f)
+    assert pyproj.get("tool", {}).get("vercel", {}).get("entrypoint") == "backend.main:app"
+    assert pyproj.get("tool", {}).get("fastapi", {}).get("entrypoint") == "backend.main:app"
+
+    # 2. Verify vercel.json
+    with open("vercel.json", "r") as f:
+        vcfg = json.load(f)
+    assert vcfg["builds"][0]["src"] == "backend/main.py"
+    assert vcfg["routes"][0]["dest"] == "backend/main.py"

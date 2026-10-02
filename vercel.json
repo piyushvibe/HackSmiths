@@ -2,7 +2,7 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/index.py",
+      "src": "backend/main.py",
       "use": "@vercel/python",
       "config": {
         "includeFiles": [
@@ -16,7 +16,7 @@
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "api/index.py"
+      "dest": "backend/main.py"
     }
   ]
 }
