@@ -99,6 +99,8 @@ def init_db():
             cursor.execute("ALTER TABLE users ADD COLUMN email TEXT")
         if "auth_provider" not in existing_cols:
             cursor.execute("ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local'")
+        if "picture" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN picture TEXT")
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id) WHERE google_id IS NOT NULL")
         
         # 2. Sessions table
@@ -395,12 +397,14 @@ def register_user(
 def authenticate_google_signin(
     google_id: str,
     email: str,
+    picture: Optional[str] = None,
     device: str = "Mac / Chrome (Google SSO)",
     ip_address: str = "127.0.0.1",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Signs in an existing user using their verified Google identity.
     
     Returns (user_dict, None) on success, or (None, 'ACCOUNT_NOT_FOUND') if no account exists.
+    Safely links google_id if an account with matching verified email already exists.
     """
     clean_google_id = str(google_id or "").strip()
     clean_email = str(email or "").strip().lower()
@@ -408,14 +412,13 @@ def authenticate_google_signin(
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # Search by google_id first, then by email where auth_provider == 'google'
         user = None
         if clean_google_id:
             cursor.execute("SELECT * FROM users WHERE google_id = ?", (clean_google_id,))
             user = cursor.fetchone()
         
         if not user and clean_email:
-            cursor.execute("SELECT * FROM users WHERE email = ? AND (auth_provider = 'google' OR google_id IS NOT NULL)", (clean_email,))
+            cursor.execute("SELECT * FROM users WHERE LOWER(email) = ?", (clean_email,))
             user = cursor.fetchone()
 
         if not user:
@@ -431,11 +434,16 @@ def authenticate_google_signin(
             return None, "ACCOUNT_NOT_FOUND"
 
         user_dict = dict(user)
-        # Link google_id if missing
+        # Safely link google_id if missing
         if clean_google_id and not user_dict.get("google_id"):
             cursor.execute("UPDATE users SET google_id = ? WHERE id = ?", (clean_google_id, user_dict["id"]))
+            user_dict["google_id"] = clean_google_id
         if clean_email and not user_dict.get("email"):
             cursor.execute("UPDATE users SET email = ? WHERE id = ?", (clean_email, user_dict["id"]))
+            user_dict["email"] = clean_email
+        if picture and not user_dict.get("picture"):
+            cursor.execute("UPDATE users SET picture = ? WHERE id = ?", (picture, user_dict["id"]))
+            user_dict["picture"] = picture
 
         cursor.execute(
             "INSERT INTO login_attempts (username, success, ip_address, device, timestamp) VALUES (?, ?, ?, ?, ?)",
@@ -453,12 +461,13 @@ def register_google_signup(
     google_id: str,
     email: str,
     full_name: Optional[str] = None,
+    picture: Optional[str] = None,
     device: str = "Mac / Chrome (Google SSO)",
     ip_address: str = "127.0.0.1",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Registers a new account using verified Google identity.
     
-    If the Google identity is already registered, returns the existing user.
+    If the Google identity or verified email is already registered, returns the existing user (safe account linking).
     Always assigns the least-privileged default role ('Developer').
     """
     clean_google_id = str(google_id or "").strip()
@@ -470,21 +479,28 @@ def register_google_signup(
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # 1. Check if user already registered with this google_id or google email
+        # 1. Check if user already registered with this google_id or email
         cursor.execute(
-            "SELECT * FROM users WHERE (google_id = ? AND google_id IS NOT NULL) OR (email = ? AND auth_provider = 'google')",
+            "SELECT * FROM users WHERE (google_id = ? AND google_id IS NOT NULL) OR LOWER(email) = ?",
             (clean_google_id, clean_email)
         )
         existing = cursor.fetchone()
         if existing:
             user_dict = dict(existing)
+            # Link google_id if missing
+            if clean_google_id and not user_dict.get("google_id"):
+                cursor.execute("UPDATE users SET google_id = ? WHERE id = ?", (clean_google_id, user_dict["id"]))
+                user_dict["google_id"] = clean_google_id
+            if picture and not user_dict.get("picture"):
+                cursor.execute("UPDATE users SET picture = ? WHERE id = ?", (picture, user_dict["id"]))
+                user_dict["picture"] = picture
             cursor.execute(
                 "INSERT INTO login_attempts (username, success, ip_address, device, timestamp) VALUES (?, ?, ?, ?, ?)",
                 (user_dict["username"], 1, ip_address, device, now),
             )
             cursor.execute(
                 "INSERT INTO security_events (session_id, user_id, event_type, severity, description, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                (None, user_dict["id"], "GOOGLE_SSO_LOGIN", "INFO", f"Existing Google account logged in during Sign Up for '{user_dict['username']}'", now),
+                (None, user_dict["id"], "GOOGLE_SSO_LOGIN", "INFO", f"Existing account recognized and linked during Google Sign Up for '{user_dict['username']}'", now),
             )
             conn.commit()
             return user_dict, None
@@ -510,9 +526,9 @@ def register_google_signup(
         assigned_role = "Developer"
 
         cursor.execute(
-            """INSERT INTO users (id, username, password_hash, salt, role, full_name, created_at, google_id, email, auth_provider)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, candidate_username, pw_hash, salt, assigned_role, display_name, now, clean_google_id or None, clean_email, "google"),
+            """INSERT INTO users (id, username, password_hash, salt, role, full_name, created_at, google_id, email, auth_provider, picture)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, candidate_username, pw_hash, salt, assigned_role, display_name, now, clean_google_id or None, clean_email, "google", picture),
         )
         cursor.execute(
             """INSERT INTO security_events (session_id, user_id, event_type, severity, description, timestamp)
@@ -536,6 +552,7 @@ def authenticate_or_register_google_user(
     role: str = "Developer",
     device: str = "Mac / Chrome (Google SSO)",
     ip_address: str = "127.0.0.1",
+    picture: Optional[str] = None,
     mode: str = "signin",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Unified Google authentication handler respecting Sign In vs Sign Up mode."""
@@ -545,6 +562,7 @@ def authenticate_or_register_google_user(
             google_id=google_id or "",
             email=email,
             full_name=full_name,
+            picture=picture,
             device=device,
             ip_address=ip_address,
         )
@@ -552,6 +570,7 @@ def authenticate_or_register_google_user(
         return authenticate_google_signin(
             google_id=google_id or "",
             email=email,
+            picture=picture,
             device=device,
             ip_address=ip_address,
         )

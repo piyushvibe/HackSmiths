@@ -16,11 +16,14 @@ def get_google_client_id() -> str:
 def get_google_client_secret() -> str:
     return os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 
-def get_google_callback_url() -> str:
-    return os.getenv("GOOGLE_CALLBACK_URL", "http://localhost:8000/auth/google/callback").strip()
-
 def get_app_base_url() -> str:
-    return os.getenv("APP_BASE_URL", "http://localhost:8000").strip()
+    return os.getenv("APP_BASE_URL", "http://localhost:8000").strip().rstrip("/")
+
+def get_google_callback_url() -> str:
+    explicit = os.getenv("GOOGLE_REDIRECT_URI", "").strip() or os.getenv("GOOGLE_CALLBACK_URL", "").strip()
+    if explicit:
+        return explicit
+    return f"{get_app_base_url()}/auth/google/callback"
 
 GOOGLE_CLIENT_ID = get_google_client_id()
 GOOGLE_CLIENT_SECRET = get_google_client_secret()
@@ -42,7 +45,7 @@ async def verify_google_id_token(id_token: str, expected_client_id: Optional[str
     if not clean_token:
         return None
 
-    target_aud = expected_client_id or GOOGLE_CLIENT_ID
+    target_aud = (expected_client_id or get_google_client_id()).strip()
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -94,9 +97,9 @@ async def exchange_google_auth_code(
     redirect_uri: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Exchanges an authorization code for tokens with Google's OAuth 2.0 token endpoint."""
-    c_id = client_id or GOOGLE_CLIENT_ID
-    c_secret = client_secret or GOOGLE_CLIENT_SECRET
-    r_uri = redirect_uri or GOOGLE_CALLBACK_URL
+    c_id = (client_id or get_google_client_id()).strip()
+    c_secret = (client_secret or get_google_client_secret()).strip()
+    r_uri = (redirect_uri or get_google_callback_url()).strip()
 
     if not c_id or not c_secret:
         logger.error("Cannot exchange Google code: GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET missing.")

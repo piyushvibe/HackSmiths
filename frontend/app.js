@@ -359,27 +359,113 @@
 
     setGoogleAuthLoading(true, "Connecting to Google...");
 
-    // Try Google Identity Services prompt first if available, else redirect to official authorization endpoint
-    if (window.google?.accounts?.id && googleConfig.client_id) {
+    // 1. Try Google Identity Services OAuth 2.0 Code Client Popup (native account chooser)
+    if (window.google?.accounts?.oauth2?.initCodeClient && googleConfig.client_id) {
       try {
-        window.google.accounts.id.prompt((notification) => {
-          if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-            window.location.href = `/auth/google/login?mode=${encodeURIComponent(mode)}`;
-          }
+        const client = window.google.accounts.oauth2.initCodeClient({
+          client_id: googleConfig.client_id,
+          scope: "openid email profile",
+          ux_mode: "popup",
+          select_account: true,
+          callback: async (authCodeResp) => {
+            if (!authCodeResp || !authCodeResp.code) {
+              setGoogleAuthLoading(false, "Continue with Google");
+              if (authCodeResp?.error && authCodeResp.error !== "popup_closed_by_user" && authCodeResp.error !== "access_denied") {
+                showLoginError(`Google Sign-In notice: ${authCodeResp.error.replace(/_/g, " ")}`);
+              }
+              return;
+            }
+            await handleGoogleCodeResponse(authCodeResp.code, "postmessage");
+          },
+          error_callback: (err) => {
+            console.warn("GIS popup error or blocked, falling back to window popup:", err);
+            openOAuthPopup(mode);
+          },
         });
-        setTimeout(() => {
-          if (isAuthLoading && !sessionStorage.getItem("shield_session")) {
-            window.location.href = `/auth/google/login?mode=${encodeURIComponent(mode)}`;
-          }
-        }, 1800);
+        client.requestCode();
         return;
-      } catch (err) {
-        console.warn("GIS prompt error, falling back to OAuth redirect:", err);
+      } catch (gisErr) {
+        console.warn("GIS initCodeClient failed, falling back to window popup:", gisErr);
       }
     }
 
-    // Direct OAuth 2.0 authorization redirect
-    window.location.href = `/auth/google/login?mode=${encodeURIComponent(mode)}`;
+    // 2. Fallback to Window OAuth Popup
+    openOAuthPopup(mode);
+  }
+
+  function openOAuthPopup(mode) {
+    const width = 500;
+    const height = 650;
+    const left = Math.max(0, (window.screen.width - width) / 2);
+    const top = Math.max(0, (window.screen.height - height) / 2);
+    const popupUrl = `/auth/google/login?mode=${encodeURIComponent(mode)}&popup=1`;
+
+    let popup = null;
+    try {
+      popup = window.open(
+        popupUrl,
+        "llm_shield_google_oauth",
+        `width=${width},height=${height},top=${top},left=${left},status=no,toolbar=no,menubar=no`
+      );
+    } catch (e) {
+      console.warn("Window.open threw exception:", e);
+    }
+
+    // 3. Fallback to in-window redirect if popup was blocked by browser
+    if (!popup || popup.closed || typeof popup.closed === "undefined") {
+      console.warn("OAuth popup was blocked by the browser. Falling back to full page redirect.");
+      window.location.href = `/auth/google/login?mode=${encodeURIComponent(mode)}`;
+      return;
+    }
+
+    // Poll to detect if user closed the popup without authenticating
+    const checkClosedInterval = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(checkClosedInterval);
+        setTimeout(() => {
+          if (isAuthLoading && !sessionStorage.getItem("shield_session")) {
+            setGoogleAuthLoading(false, "Continue with Google");
+          }
+        }, 500);
+      }
+    }, 800);
+  }
+
+  async function handleGoogleCodeResponse(code, redirectUri) {
+    setGoogleAuthLoading(true, "Verifying Google Identity...");
+    hideLoginError();
+
+    try {
+      const resp = await fetch("/auth/google/code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: code,
+          redirect_uri: redirectUri || "postmessage",
+          mode: authMode,
+          device: "Mac / Chrome (Google SSO)",
+        }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        setGoogleAuthLoading(false, "Continue with Google");
+        if (resp.status === 404 && authMode === "signin") {
+          setAuthMode("signup");
+          showLoginError("No LLM Shield account found with this Google identity. Please switch to Sign Up to create your account.", "ℹ️");
+        } else {
+          showLoginError(data.detail || "Google authentication failed. Please try again.");
+        }
+        return;
+      }
+
+      applyAuthenticatedSession(data);
+    } catch (err) {
+      setGoogleAuthLoading(false, "Continue with Google");
+      showLoginError("Gateway communication error during Google verification.");
+      console.error("Google verify error:", err);
+    }
   }
 
   async function handleGoogleCredentialResponse(response) {
@@ -655,6 +741,27 @@
         window.addEventListener("load", setupGis);
       }
     }
+
+    // 4. Setup message listener for popup OAuth completion
+    window.addEventListener("message", (event) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type === "GOOGLE_AUTH_SUCCESS" && event.data?.session) {
+        applyAuthenticatedSession(event.data.session);
+      } else if (event.data?.type === "GOOGLE_AUTH_ERROR") {
+        setGoogleAuthLoading(false, "Continue with Google");
+        const err = event.data.error || "auth_failed";
+        if (err === "account_not_found") {
+          setAuthMode("signup");
+          showLoginError("No LLM Shield account found with this Google identity. Please create your account below.", "ℹ️");
+        } else if (err === "access_denied") {
+          showLoginError("Google authentication was cancelled.", "ℹ️");
+        } else if (err === "google_not_configured") {
+          showLoginError("Google OAuth is not configured on the server. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env.", "ℹ️");
+        } else {
+          showLoginError(`Google Authentication notice: ${err.replace(/_/g, " ")}.`, "⚠️");
+        }
+      }
+    });
   }
 
   function handleLogout() {

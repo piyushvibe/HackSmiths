@@ -119,6 +119,9 @@ class RegisterRequest(BaseModel):
 class GoogleAuthRequest(BaseModel):
     """Payload for Google SSO /auth/google."""
     credential: Optional[str] = Field(None, description="Google OpenID Connect ID token / JWT")
+    code: Optional[str] = Field(None, description="Google OAuth 2.0 authorization code from popup / GIS")
+    redirect_uri: Optional[str] = Field(None, description="Redirect URI matching authorization request")
+    picture: Optional[str] = Field(None, description="Profile picture URL from Google profile")
     email: Optional[str] = None
     full_name: Optional[str] = None
     google_id: Optional[str] = None

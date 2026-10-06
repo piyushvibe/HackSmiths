@@ -224,4 +224,110 @@ def test_frontend_registration_and_google_elements():
     assert "triggerGoogleAuth" in js_resp.text
     assert "initGoogleAuth" in js_resp.text
     assert "setAuthMode" in js_resp.text
+    assert "openOAuthPopup" in js_resp.text
+    assert "handleGoogleCodeResponse" in js_resp.text
+
+
+def test_google_safe_account_linking():
+    """Verify that an account registered with email/password safely links with Google SSO."""
+    import secrets
+    email = f"user_{secrets.token_hex(4)}@company.com"
+    username = f"emp_{secrets.token_hex(4)}"
+    password = "SecurePassword123!"
+
+    # 1. Register with email/password
+    reg_resp = client.post(
+        "/auth/register",
+        json={
+            "username": username,
+            "email": email,
+            "password": password,
+            "full_name": "Corporate Employee",
+        },
+    )
+    assert reg_resp.status_code == 200
+    initial_user_id = reg_resp.json()["user_id"]
+
+    # 2. Authenticate with Google using the same verified email
+    google_id = f"goog_{secrets.token_hex(8)}"
+    link_resp = client.post(
+        "/auth/google",
+        json={
+            "google_id": google_id,
+            "email": email,
+            "full_name": "Corporate Employee",
+            "mode": "signin",
+        },
+    )
+    assert link_resp.status_code == 200
+    link_data = link_resp.json()
+    assert link_data["user_id"] == initial_user_id
+    assert link_data["username"] == username
+
+    # 3. Verify in database that google_id was linked to the same record
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, google_id, email, username FROM users WHERE email = ?", (email,))
+        db_user = cursor.fetchone()
+        assert db_user is not None
+        assert db_user["id"] == initial_user_id
+        assert db_user["google_id"] == google_id
+
+
+def test_google_popup_callback_postmessage(monkeypatch):
+    """Verify that a popup OAuth callback returns HTML with postMessage communication."""
+    from unittest.mock import AsyncMock
+
+    mock_tokens = {"id_token": "mock.id.token", "access_token": "mock_access"}
+    mock_payload = {
+        "sub": "goog_sub_popup_123",
+        "email": "popup_user@example.com",
+        "name": "Popup User",
+        "email_verified": True,
+        "iss": "https://accounts.google.com",
+    }
+
+    import backend.main as main_mod
+    monkeypatch.setattr(main_mod, "exchange_google_auth_code", AsyncMock(return_value=mock_tokens))
+    monkeypatch.setattr(main_mod, "verify_google_id_token", AsyncMock(return_value=mock_payload))
+
+    # Test callback with popup state and mode=signup
+    resp = client.get("/auth/google/callback?code=mock_code&state=popup:signup:token123")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "GOOGLE_AUTH_SUCCESS" in resp.text
+    assert "window.opener.postMessage" in resp.text
+    assert "popup_user" in resp.text
+
+
+def test_google_code_endpoint_exchange(monkeypatch):
+    """Verify POST /auth/google/code exchanges code and returns LoginResponse."""
+    from unittest.mock import AsyncMock
+
+    mock_tokens = {"id_token": "mock.id.token.code"}
+    mock_payload = {
+        "sub": "goog_sub_code_456",
+        "email": "code_user@example.com",
+        "name": "Code User",
+        "email_verified": True,
+        "iss": "https://accounts.google.com",
+    }
+
+    import backend.main as main_mod
+    monkeypatch.setattr(main_mod, "exchange_google_auth_code", AsyncMock(return_value=mock_tokens))
+    monkeypatch.setattr(main_mod, "verify_google_id_token", AsyncMock(return_value=mock_payload))
+
+    resp = client.post(
+        "/auth/google/code",
+        json={
+            "code": "4/0AeanS0...",
+            "mode": "signup",
+            "redirect_uri": "postmessage",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "token" in data
+    assert data["role"] == "Developer"
+    assert "code_user" in data["username"]
 

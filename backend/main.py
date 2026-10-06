@@ -14,7 +14,7 @@ load_dotenv()
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, RedirectResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -319,7 +319,7 @@ async def google_config_endpoint():
 
 
 @app.get("/auth/google/login")
-async def google_login_redirect(mode: str = "signin"):
+async def google_login_redirect(mode: str = "signin", popup: int = 0):
     """Redirects user to Google OAuth 2.0 authorization endpoint."""
     client_id = get_google_client_id()
     secret = get_google_client_secret()
@@ -327,7 +327,8 @@ async def google_login_redirect(mode: str = "signin"):
         return RedirectResponse(url="/?auth_error=google_not_configured")
 
     clean_mode = "signup" if str(mode).lower() == "signup" else "signin"
-    state_token = f"{clean_mode}:{secrets.token_urlsafe(16)}"
+    popup_prefix = "popup:" if popup else ""
+    state_token = f"{popup_prefix}{clean_mode}:{secrets.token_urlsafe(16)}"
     
     params = {
         "response_type": "code",
@@ -349,51 +350,86 @@ async def google_oauth_callback(
     error: Optional[str] = None,
 ):
     """Handles OAuth 2.0 callback from Google, exchanges code for ID token, and logs in user."""
+    is_popup = False
+    mode = "signin"
+    if state:
+        if state.startswith("popup:"):
+            is_popup = True
+            state = state[len("popup:"):]
+        if ":" in state:
+            mode = state.split(":")[0]
+
+    def render_error(err_name: str, err_mode: str = mode, email_val: str = ""):
+        if is_popup:
+            html = f"""<!DOCTYPE html>
+<html>
+<head><title>Google Authentication</title><meta charset="utf-8"></head>
+<body style="background:#0b0f19;color:#e2e8f0;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="text-align:center;">
+    <p style="color:#f87171;font-size:14px;">Authentication error: {err_name.replace('_', ' ')}</p>
+  </div>
+  <script>
+    if (window.opener) {{
+      window.opener.postMessage({{
+        type: 'GOOGLE_AUTH_ERROR',
+        error: {json.dumps(err_name)},
+        mode: {json.dumps(err_mode)},
+        email: {json.dumps(email_val)}
+      }}, window.location.origin);
+      window.close();
+    }} else {{
+      window.location.href = '/?auth_error=' + encodeURIComponent({json.dumps(err_name)}) + '&mode=' + encodeURIComponent({json.dumps(err_mode)}) + '&email=' + encodeURIComponent({json.dumps(email_val)});
+    }}
+  </script>
+</body>
+</html>"""
+            return Response(content=html, media_type="text/html")
+        else:
+            return RedirectResponse(url=f"/?auth_error={quote(err_name)}&mode={quote(err_mode)}&email={quote(email_val)}")
+
     if error:
         err_msg = "access_denied" if "access_denied" in str(error) else str(error)
-        return RedirectResponse(url=f"/?auth_error={err_msg}")
+        return render_error(err_msg)
 
     if not code:
-        return RedirectResponse(url="/?auth_error=missing_code")
-
-    # Extract mode from state
-    mode = "signin"
-    if state and ":" in state:
-        mode = state.split(":")[0]
+        return render_error("missing_code")
 
     # Exchange code for tokens
     tokens = await exchange_google_auth_code(code)
     if not tokens or "id_token" not in tokens:
-        return RedirectResponse(url="/?auth_error=token_exchange_failed")
+        return render_error("token_exchange_failed")
 
     # Verify ID token
     verified_payload = await verify_google_id_token(tokens["id_token"])
     if not verified_payload:
-        return RedirectResponse(url="/?auth_error=invalid_token")
+        return render_error("invalid_token")
 
     google_id = verified_payload.get("sub", "")
     email = verified_payload.get("email", "")
     full_name = verified_payload.get("name") or email.split("@")[0].title()
+    picture = verified_payload.get("picture")
 
     if mode == "signup":
         user, err = register_google_signup(
             google_id=google_id,
             email=email,
             full_name=full_name,
+            picture=picture,
             device="Mac / Chrome (Google SSO)",
         )
     else:
         user, err = authenticate_google_signin(
             google_id=google_id,
             email=email,
+            picture=picture,
             device="Mac / Chrome (Google SSO)",
         )
 
     if err == "ACCOUNT_NOT_FOUND":
-        return RedirectResponse(url=f"/?auth_error=account_not_found&mode=signup&email={quote(email)}")
+        return render_error("account_not_found", err_mode="signup", email_val=email)
     
     if err or not user:
-        return RedirectResponse(url=f"/?auth_error={quote(err or 'auth_failed')}")
+        return render_error(err or "auth_failed")
 
     session = create_user_session(user["id"], device="Mac / Chrome (Google SSO)")
     recalculate_risk(session["session_id"])
@@ -413,7 +449,7 @@ async def google_oauth_callback(
         )
     )
 
-    session_data = json.dumps({
+    session_data = {
         "token": session["token"],
         "user_id": session["user_id"],
         "username": session["username"],
@@ -426,21 +462,71 @@ async def google_oauth_callback(
         "device": session["device"],
         "login_time": session["login_time"],
         "mfa_verified": False,
-    })
-    return RedirectResponse(url=f"/?auth_token={quote(session['token'])}&auth_session={quote(session_data)}")
+        "picture": user.get("picture"),
+    }
+
+    if is_popup:
+        session_json_str = json.dumps(session_data)
+        html = f"""<!DOCTYPE html>
+<html>
+<head><title>Google Authentication</title><meta charset="utf-8"></head>
+<body style="background:#0b0f19;color:#e2e8f0;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="text-align:center;">
+    <h3 style="margin-bottom:8px;">Authentication Successful</h3>
+    <p style="color:#94a3b8;font-size:14px;">Completing login and returning to LLM Shield...</p>
+  </div>
+  <script>
+    const sessionData = {session_json_str};
+    if (window.opener) {{
+      window.opener.postMessage({{ type: 'GOOGLE_AUTH_SUCCESS', session: sessionData }}, window.location.origin);
+      window.close();
+    }} else {{
+      window.location.href = '/?auth_token=' + encodeURIComponent(sessionData.token) + '&auth_session=' + encodeURIComponent(JSON.stringify(sessionData));
+    }}
+  </script>
+</body>
+</html>"""
+        return Response(content=html, media_type="text/html")
+
+    session_json_encoded = json.dumps(session_data)
+    return RedirectResponse(url=f"/?auth_token={quote(session['token'])}&auth_session={quote(session_json_encoded)}")
 
 
 @app.post("/auth/google", response_model=LoginResponse)
 @app.post("/auth/google/verify", response_model=LoginResponse)
+@app.post("/auth/google/code", response_model=LoginResponse)
 async def google_auth_endpoint(payload: GoogleAuthRequest):
-    """Authenticates or registers user via Google SSO (GIS ID Token or verified payload)."""
+    """Authenticates or registers user via Google SSO (GIS code, ID token, or verified payload)."""
     mode = (payload.mode or "signin").strip().lower()
     google_id = payload.google_id
     email = payload.email
     full_name = payload.full_name
+    picture = payload.picture
+
+    # If client passed an authorization code (from Google Identity Services popup)
+    if payload.code:
+        r_uri = (payload.redirect_uri or "postmessage").strip()
+        tokens = await exchange_google_auth_code(payload.code, redirect_uri=r_uri)
+        if not tokens and r_uri == "postmessage":
+            tokens = await exchange_google_auth_code(payload.code, redirect_uri=get_google_callback_url())
+        if not tokens or "id_token" not in tokens:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to exchange authorization code with Google OAuth.",
+            )
+        verified = await verify_google_id_token(tokens["id_token"])
+        if not verified:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Google identity verification failed. Invalid ID token or unverified email.",
+            )
+        google_id = verified.get("sub")
+        email = verified.get("email")
+        full_name = verified.get("name") or (email.split("@")[0].title() if email else "Google User")
+        picture = verified.get("picture")
 
     # If client passed a Google ID token from Google Identity Services
-    if payload.credential:
+    elif payload.credential:
         verified = await verify_google_id_token(payload.credential)
         if not verified:
             raise HTTPException(
@@ -450,6 +536,7 @@ async def google_auth_endpoint(payload: GoogleAuthRequest):
         google_id = verified.get("sub")
         email = verified.get("email")
         full_name = verified.get("name") or (email.split("@")[0].title() if email else "Google User")
+        picture = verified.get("picture")
 
     if not email or "@" not in email:
         raise HTTPException(
@@ -463,6 +550,7 @@ async def google_auth_endpoint(payload: GoogleAuthRequest):
             google_id=google_id or "",
             email=email,
             full_name=full_name,
+            picture=picture,
             device=payload.device or "Mac / Chrome (Google SSO)",
             ip_address=payload.ip_address or "127.0.0.1",
         )
@@ -470,6 +558,7 @@ async def google_auth_endpoint(payload: GoogleAuthRequest):
         user, err = authenticate_google_signin(
             google_id=google_id or "",
             email=email,
+            picture=picture,
             device=payload.device or "Mac / Chrome (Google SSO)",
             ip_address=payload.ip_address or "127.0.0.1",
         )
